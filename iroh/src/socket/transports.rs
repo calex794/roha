@@ -62,7 +62,7 @@ pub(crate) struct Transports {
 /// Combined watcher type for all ip transports
 type IpTransportsWatcher = n0_watcher::Join<SocketAddr, n0_watcher::Direct<SocketAddr>>;
 /// Combined watcher type for all custom transports
-type CustomTransportsWatcher =
+pub(super) type CustomTransportsWatcher =
     n0_watcher::Join<Vec<CustomAddr>, n0_watcher::Direct<Vec<CustomAddr>>>;
 /// Combined watcher type for all relay transports
 type RelayTransportsWatcher = n0_watcher::Join<
@@ -364,6 +364,13 @@ impl Transports {
                 Poll::Pending
             }
         }
+    }
+
+    /// Watch local addresses advertised by custom transports independently of IP and relay.
+    ///
+    /// The remote actor uses this to stop routing packets through withdrawn addresses.
+    pub(super) fn custom_addrs_watch(&self) -> CustomTransportsWatcher {
+        n0_watcher::Join::new(self.custom.iter().map(|t| t.watch_local_addrs()))
     }
 
     /// Returns a list of all currently known local addresses.
