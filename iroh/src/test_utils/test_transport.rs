@@ -50,7 +50,7 @@ pub struct TestTransport {
 impl TestTransport {
     /// Withdraw the address advertised by this custom endpoint.
     fn withdraw_local_addrs(&self) {
-        self.id_watchable.update(Vec::new());
+        self.id_watchable.set(Vec::new()).expect("test transport address watcher open");
     }
 }
 
