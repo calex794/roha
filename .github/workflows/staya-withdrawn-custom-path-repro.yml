@@ -1,0 +1,35 @@
+name: Staya withdrawn custom path reproduction
+on:
+  push:
+    branches:
+      - lab/staya-custom-path-withdrawal-repro-20261019
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  reproduce:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: "1.91.0"
+      - name: Run targeted custom path regression on pinned noq 1.3.0
+        shell: bash
+        env:
+          RUST_BACKTRACE: "1"
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/calex794/noq.git /tmp/staya-noq
+          git -C /tmp/staya-noq checkout --quiet c1f411562e6078852749b8bcf1190523096a107f
+          grep -q 'version = "1.3.0"' /tmp/staya-noq/Cargo.toml
+          cat >> Cargo.toml <<'PATCH'
+
+          [patch.crates-io]
+          noq = { path = "/tmp/staya-noq/noq" }
+          noq-proto = { path = "/tmp/staya-noq/noq-proto" }
+          noq-udp = { path = "/tmp/staya-noq/noq-udp" }
+          PATCH
+          cargo +1.91.0 test -p iroh --features unstable-custom-transports,test-utils --lib test_staya_withdrawn_custom_only_connection_exits_within_deadline -- --nocapture
