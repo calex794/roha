@@ -1243,7 +1243,10 @@ impl RelayActor {
             }
             Err(mpsc::error::TrySendError::Full(item)) => {
                 if self.congested_relay_workers.len() >= MAX_CONGESTED_RELAY_WORKERS {
-                    warn!(?url, "Dropped datagram(s): maximum congested relays reached");
+                    warn!(
+                        ?url,
+                        "Dropped datagram(s): maximum congested relays reached"
+                    );
                     return;
                 }
                 let sender = handle.datagrams_send_queue.clone();
@@ -1256,15 +1259,13 @@ impl RelayActor {
                 let worker_url = url.clone();
                 self.congested_relay_workers.spawn(async move {
                     loop {
-                        let packet = match time::timeout(
-                            CONGESTED_WORKER_IDLE_TIMEOUT,
-                            backlog_rx.recv(),
-                        )
-                        .await
-                        {
-                            Ok(Some(packet)) => packet,
-                            _ => break,
-                        };
+                        let packet =
+                            match time::timeout(CONGESTED_WORKER_IDLE_TIMEOUT, backlog_rx.recv())
+                                .await
+                            {
+                                Ok(Some(packet)) => packet,
+                                _ => break,
+                            };
                         match time::timeout(CONGESTED_SEND_TIMEOUT, sender.send(packet)).await {
                             Ok(Ok(())) => {}
                             Ok(Err(_)) => {
