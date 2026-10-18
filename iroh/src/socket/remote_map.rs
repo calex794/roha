@@ -180,6 +180,7 @@ struct Tasks {
     metrics: Arc<SocketMetrics>,
     /// The "direct" addresses known for our local endpoint
     local_direct_addrs: n0_watcher::Direct<BTreeSet<DirectAddr>>,
+    local_custom_addrs: transports::CustomTransportsWatcher,
     address_lookup: address_lookup::AddressLookupServices,
     shutdown_token: CancellationToken,
 
@@ -204,6 +205,7 @@ impl RemoteMap {
     pub(super) fn new(
         metrics: Arc<SocketMetrics>,
         local_direct_addrs: n0_watcher::Direct<BTreeSet<DirectAddr>>,
+        local_custom_addrs: transports::CustomTransportsWatcher,
         address_lookup: address_lookup::AddressLookupServices,
         shutdown_token: CancellationToken,
         path_selector: Arc<dyn PathSelector>,
@@ -215,6 +217,7 @@ impl RemoteMap {
             tasks: Tasks {
                 metrics,
                 local_direct_addrs,
+                local_custom_addrs,
                 address_lookup,
                 shutdown_token,
                 tasks: Default::default(),
@@ -378,6 +381,7 @@ impl Tasks {
         let sender = RemoteStateActor::new(
             eid,
             self.local_direct_addrs.clone(),
+            self.local_custom_addrs.clone(),
             mapped_addrs.clone(),
             self.metrics.clone(),
             self.address_lookup.clone(),
@@ -591,6 +595,7 @@ mod tests {
         let remote_map = RemoteMap::new(
             metrics,
             local_direct_addrs,
+            n0_watcher::Join::new(std::iter::empty::<n0_watcher::Direct<Vec<iroh_base::CustomAddr>>>()),
             address_lookup::AddressLookupServices::default(),
             shutdown_token.clone(),
             Arc::new(BiasedRttPathSelector::default()),
