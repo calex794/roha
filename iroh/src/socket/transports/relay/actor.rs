@@ -1595,8 +1595,14 @@ mod tests {
         let (_control_tx, control_rx) = mpsc::channel(4);
         let (out_tx, out_rx) = mpsc::channel(8);
         let runner = tokio::spawn(actor.run(control_rx, out_rx));
-        out_tx.send(frame(r1)).await.expect("R1 outgoing queue open");
-        out_tx.send(frame(r2)).await.expect("R2 outgoing queue open");
+        out_tx
+            .send(frame(r1))
+            .await
+            .expect("R1 outgoing queue open");
+        out_tx
+            .send(frame(r2))
+            .await
+            .expect("R2 outgoing queue open");
 
         let healthy_frame = tokio::time::timeout(Duration::from_millis(500), r2_rx.recv())
             .await
