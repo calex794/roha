@@ -49,7 +49,7 @@ use iroh_relay::{
 };
 use n0_error::{AnyError, e, stack_error};
 use n0_future::{
-    FuturesUnorderedBounded, MaybeFuture, SinkExt, StreamExt,
+    FuturesUnorderedBounded, SinkExt, StreamExt,
     task::{JoinError, JoinSet},
     time::{self, Duration, Instant, MissedTickBehavior},
 };
@@ -66,6 +66,13 @@ use crate::{endpoint::RelayStatus, net_report::Report, socket::Metrics as Socket
 
 /// How long a non-home relay connection needs to be idle (last written to) before we close it.
 const RELAY_INACTIVE_CLEANUP_TIME: Duration = Duration::from_secs(60);
+
+/// Isolation for congested relays: no relay may block the shared actor loop.
+/// Pending messages are kept per relay in bounded, ordered channels.
+const MAX_CONGESTED_RELAY_WORKERS: usize = 8;
+const PER_RELAY_PENDING_CAPACITY: usize = 32;
+const CONGESTED_SEND_TIMEOUT: Duration = Duration::from_secs(3);
+const CONGESTED_WORKER_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Interval in which we ping the relay server to ensure the connection is alive.
 ///
@@ -928,6 +935,10 @@ pub(super) struct RelayActor {
     active_relays: BTreeMap<RelayUrl, ActiveRelayHandle>,
     /// The tasks for the [`ActiveRelayActor`]s in `active_relays` above.
     active_relay_tasks: JoinSet<()>,
+    /// Each stalled destination has at most one FIFO worker and a bounded
+    /// queue. Other destinations are processed by the common loop.
+    congested_relay_queues: BTreeMap<RelayUrl, mpsc::Sender<RelaySendItem>>,
+    congested_relay_workers: JoinSet<RelayUrl>,
     cancel_token: CancellationToken,
 }
 
@@ -1123,6 +1134,8 @@ impl RelayActor {
             relay_datagram_recv_queue,
             active_relays: Default::default(),
             active_relay_tasks: JoinSet::new(),
+            congested_relay_queues: BTreeMap::new(),
+            congested_relay_workers: JoinSet::new(),
             cancel_token,
         }
     }
@@ -1132,10 +1145,6 @@ impl RelayActor {
         mut receiver: mpsc::Receiver<RelayActorMessage>,
         mut datagram_send_channel: mpsc::Receiver<RelaySendItem>,
     ) {
-        // When this future is present, it is sending pending datagrams to an
-        // ActiveRelayActor.  We can not process further datagrams during this time.
-        let mut datagram_send_fut = std::pin::pin!(MaybeFuture::None);
-
         loop {
             tokio::select! {
                 biased;
@@ -1155,25 +1164,28 @@ impl RelayActor {
                     let cancel_token = self.cancel_token.child_token();
                     cancel_token.run_until_cancelled(self.handle_msg(msg)).await;
                 }
-                // Only poll for new datagrams if we are not blocked on sending them.
-                item = datagram_send_channel.recv(), if datagram_send_fut.is_none() => {
+                // Congested relay workers never block this global receive path.
+                finished = self.congested_relay_workers.join_next(),
+                    if !self.congested_relay_workers.is_empty() => {
+                    if let Some(Ok(url)) = finished {
+                        self.reap_congested_relay(&url);
+                    } else if let Some(Err(err)) = finished {
+                        warn!(%err, "Congested relay forwarding worker failed");
+                    }
+                }
+                item = datagram_send_channel.recv() => {
                     let Some(item) = item else {
                         debug!("Datagram send channel dropped, shutting down.");
                         break;
                     };
                     let token = self.cancel_token.child_token();
-                    if let Some(Some(fut)) = token.run_until_cancelled(
-                        self.try_send_datagram(item)
-                    ).await {
-                        datagram_send_fut.as_mut().set_future(fut);
-                    }
-                }
-                // Only poll this future if it is in use.
-                _ = &mut datagram_send_fut, if datagram_send_fut.is_some() => {
-                    datagram_send_fut.as_mut().set_none();
+                    let _ = token.run_until_cancelled(self.try_send_datagram(item)).await;
                 }
             }
         }
+
+        // Abort pending relay sends on exit, including a blocked destination.
+        self.congested_relay_workers.abort_all();
 
         // try shutdown
         if time::timeout(Duration::from_secs(3), self.close_all_active_relays())
@@ -1198,33 +1210,89 @@ impl RelayActor {
         }
     }
 
-    /// Sends datagrams to the correct [`ActiveRelayActor`], or returns a future.
-    ///
-    /// If the datagram can not be sent immediately, because the destination channel is
-    /// full, a future is returned that will complete once the datagrams have been sent to
-    /// the [`ActiveRelayActor`].
-    async fn try_send_datagram(
-        &mut self,
-        item: RelaySendItem,
-    ) -> Option<impl Future<Output = ()> + use<>> {
+    /// A completed older worker must never erase a newer live worker's
+    /// queue at the same relay URL. Closed entries can safely be removed.
+    fn reap_congested_relay(&mut self, url: &RelayUrl) {
+        if self
+            .congested_relay_queues
+            .get(url)
+            .is_some_and(|queue| queue.is_closed())
+        {
+            self.congested_relay_queues.remove(url);
+        }
+    }
+
+    /// Route a datagram without letting a full relay's channel stall
+    /// unrelated destinations. A healthy but busy relay gets a bounded
+    /// FIFO backlog instead of dropping its first congested datagrams.
+    async fn try_send_datagram(&mut self, item: RelaySendItem) {
         let url = item.url.clone();
+        // Keep later frames in the same relay's FIFO once it is congested:
+        // do not bypass an older deferred frame through the direct queue.
+        let item = if let Some(queue) = self.congested_relay_queues.get(&url) {
+            match queue.try_send(item) {
+                Ok(()) => return,
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    warn!(?url, "Dropped datagram(s): bounded per-relay backlog full");
+                    return;
+                }
+                Err(mpsc::error::TrySendError::Closed(item)) => {
+                    self.congested_relay_queues.remove(&url);
+                    item
+                }
+            }
+        } else {
+            item
+        };
+
         let handle = self
             .active_relay_handle_for_endpoint(&item.url, &item.remote_endpoint)
             .await;
         match handle.datagrams_send_queue.try_send(item) {
-            Ok(()) => None,
+            Ok(()) => {}
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 warn!(?url, "Dropped datagram(s): ActiveRelayActor closed.");
-                None
             }
             Err(mpsc::error::TrySendError::Full(item)) => {
+                if self.congested_relay_workers.len() >= MAX_CONGESTED_RELAY_WORKERS {
+                    warn!(
+                        ?url,
+                        "Dropped datagram(s): maximum congested relays reached"
+                    );
+                    return;
+                }
                 let sender = handle.datagrams_send_queue.clone();
-                let fut = async move {
-                    if sender.send(item).await.is_err() {
-                        warn!(?url, "Dropped datagram(s): ActiveRelayActor closed.");
+                let (backlog_tx, mut backlog_rx) = mpsc::channel(PER_RELAY_PENDING_CAPACITY);
+                // A newly created channel has space for its first item.
+                if backlog_tx.try_send(item).is_err() {
+                    warn!(?url, "Dropped datagram(s): failed to stage first packet");
+                    return;
+                }
+                let worker_url = url.clone();
+                self.congested_relay_workers.spawn(async move {
+                    loop {
+                        let packet =
+                            match time::timeout(CONGESTED_WORKER_IDLE_TIMEOUT, backlog_rx.recv())
+                                .await
+                            {
+                                Ok(Some(packet)) => packet,
+                                _ => break,
+                            };
+                        match time::timeout(CONGESTED_SEND_TIMEOUT, sender.send(packet)).await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(_)) => {
+                                warn!(?worker_url, "Dropped datagram(s): target relay closed");
+                                break;
+                            }
+                            Err(_) => {
+                                warn!(?worker_url, "Dropped queued datagram(s): relay stalled");
+                                break;
+                            }
+                        }
                     }
-                };
-                Some(fut)
+                    worker_url
+                });
+                self.congested_relay_queues.insert(url, backlog_tx);
             }
         }
     }
@@ -1629,6 +1697,154 @@ mod tests {
             relay_hol_scenario(true).await,
             "healthy R2 blocked by R1's full outgoing queue (iroh #4603)"
         );
+    }
+
+    /// Builds the real relay dispatch actor with a synthetic, locally
+    /// controlled egress queue. Network access is never required.
+    fn congested_test_actor() -> (
+        RelayActor,
+        RelayUrl,
+        EndpointId,
+        mpsc::Sender<RelaySendItem>,
+        mpsc::Receiver<RelaySendItem>,
+    ) {
+        use super::ActiveRelayHandle;
+
+        let url: RelayUrl = "https://congested.example.invalid".parse().unwrap();
+        let peer = SecretKey::from_bytes(&[111u8; 32]).public();
+        let config = Config {
+            my_relay: Default::default(),
+            secret_key: SecretKey::from_bytes(&[112u8; 32]),
+            dns_resolver: DnsResolver::new(),
+            proxy_url: None,
+            ipv6_reported: Arc::new(AtomicBool::new(false)),
+            tls_config: CaTlsConfig::insecure_skip_verify()
+                .client_config(default_provider())
+                .expect("infallible"),
+            metrics: Default::default(),
+            relay_map: RelayMap::empty(),
+        };
+        let (received_tx, _received_rx) = mpsc::channel(4);
+        let mut actor = RelayActor::new(config, received_tx, CancellationToken::new());
+        let (send_tx, send_rx) = mpsc::channel(1);
+        let (prio_inbox_addr, _prio_inbox_rx) = mpsc::channel(4);
+        let (inbox_addr, _inbox_rx) = mpsc::channel(4);
+        actor.active_relays.insert(
+            url.clone(),
+            ActiveRelayHandle {
+                prio_inbox_addr,
+                inbox_addr,
+                datagrams_send_queue: send_tx.clone(),
+            },
+        );
+        (actor, url, peer, send_tx, send_rx)
+    }
+
+    fn congested_frame(url: &RelayUrl, peer: EndpointId, marker: u8) -> RelaySendItem {
+        RelaySendItem {
+            remote_endpoint: peer,
+            url: url.clone(),
+            datagrams: Datagrams::from([marker]),
+        }
+    }
+
+    /// Wait for the worker to move the first deferred frame out of its
+    /// channel, so there are exactly 32 remaining FIFO slots.
+    async fn wait_for_congested_worker(actor: &RelayActor, url: &RelayUrl) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if actor
+                    .congested_relay_queues
+                    .get(url)
+                    .is_some_and(|queue| queue.capacity() == super::PER_RELAY_PENDING_CAPACITY)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("congested worker never started");
+    }
+
+    #[tokio::test]
+    async fn congested_relay_preserves_fifo_after_temporary_stall() {
+        let (mut actor, url, peer, send_tx, mut send_rx) = congested_test_actor();
+        send_tx
+            .try_send(congested_frame(&url, peer, 0))
+            .expect("prefill R1");
+        actor
+            .try_send_datagram(congested_frame(&url, peer, 1))
+            .await;
+        wait_for_congested_worker(&actor, &url).await;
+        for marker in 2..=4 {
+            actor
+                .try_send_datagram(congested_frame(&url, peer, marker))
+                .await;
+        }
+        for expected in 0..=4 {
+            let got = tokio::time::timeout(Duration::from_secs(1), send_rx.recv())
+                .await
+                .expect("no forward progress")
+                .expect("R1 sender prematurely closed");
+            assert_eq!(
+                got.datagrams,
+                Datagrams::from([expected]),
+                "per-relay FIFO reordering"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn congested_relay_backlog_is_bounded_and_surviving_packets_ordered() {
+        let (mut actor, url, peer, send_tx, mut send_rx) = congested_test_actor();
+        send_tx
+            .try_send(congested_frame(&url, peer, 0))
+            .expect("prefill R1");
+        actor
+            .try_send_datagram(congested_frame(&url, peer, 1))
+            .await;
+        wait_for_congested_worker(&actor, &url).await;
+        // The first deferred frame belongs to the worker and 32 further
+        // frames may occupy its channel. All later frames must be dropped.
+        for marker in 2..=45 {
+            actor
+                .try_send_datagram(congested_frame(&url, peer, marker))
+                .await;
+        }
+        assert_eq!(
+            actor.congested_relay_queues.get(&url).unwrap().capacity(),
+            0,
+            "bounded relay backlog did not fill"
+        );
+        for expected in 0..=33 {
+            let got = tokio::time::timeout(Duration::from_secs(1), send_rx.recv())
+                .await
+                .expect("healthy destination stalled")
+                .expect("R1 sender prematurely closed");
+            assert_eq!(got.datagrams, Datagrams::from([expected]));
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), send_rx.recv())
+                .await
+                .is_err(),
+            "packets beyond capacity were incorrectly retained"
+        );
+    }
+
+    #[test]
+    fn completed_old_relay_worker_cannot_remove_live_replacement_queue() {
+        let (mut actor, url, _peer, _tx, _rx) = congested_test_actor();
+        let (live_sender, live_receiver) = mpsc::channel::<RelaySendItem>(1);
+        actor
+            .congested_relay_queues
+            .insert(url.clone(), live_sender);
+        // The old worker's join result arrives after its queue was replaced.
+        actor.reap_congested_relay(&url);
+        assert!(actor.congested_relay_queues.contains_key(&url));
+        drop(live_receiver);
+        actor.reap_congested_relay(&url);
+        assert!(!actor.congested_relay_queues.contains_key(&url));
     }
 
     /// Abort stands in for the runtime drop that triggers this in the wild:
