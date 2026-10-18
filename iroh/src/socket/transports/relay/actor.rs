@@ -1531,6 +1531,98 @@ mod tests {
     };
     use crate::{dns::DnsResolver, metrics::SocketMetrics, test_utils};
 
+    /// Identical reference test in unmodified and modified Roha branches.
+    /// Both relays are healthy; this measures local actor/channel throughput,
+    /// NOT physical network bandwidth or real relay capacity.
+    #[tokio::test]
+    async fn relay_two_healthy_capacity_reference() {
+        use super::ActiveRelayHandle;
+
+        const COUNT: u16 = 2048;
+        const FRAME_BYTES: usize = 1024;
+        let r1: RelayUrl = "https://healthy-reference-one.example.invalid".parse().unwrap();
+        let r2: RelayUrl = "https://healthy-reference-two.example.invalid".parse().unwrap();
+        let peer = SecretKey::from_bytes(&[117u8; 32]).public();
+        let frame = |url: &RelayUrl, marker: u8| RelaySendItem {
+            remote_endpoint: peer,
+            url: url.clone(),
+            datagrams: Datagrams::from(vec![marker; FRAME_BYTES]),
+        };
+        let config = Config {
+            my_relay: Default::default(),
+            secret_key: SecretKey::from_bytes(&[118u8; 32]),
+            dns_resolver: DnsResolver::new(),
+            proxy_url: None,
+            ipv6_reported: Arc::new(AtomicBool::new(false)),
+            tls_config: CaTlsConfig::insecure_skip_verify()
+                .client_config(default_provider())
+                .expect("infallible"),
+            metrics: Default::default(),
+            relay_map: RelayMap::empty(),
+        };
+        let (recv_tx, _recv_rx) = mpsc::channel(4);
+        let cancel = CancellationToken::new();
+        let mut actor = RelayActor::new(config, recv_tx, cancel.clone());
+
+        let (r1_tx, mut r1_rx) = mpsc::channel(COUNT as usize);
+        let (r1_prio_tx, _r1_prio_rx) = mpsc::channel(4);
+        let (r1_inbox_tx, _r1_inbox_rx) = mpsc::channel(4);
+        actor.active_relays.insert(
+            r1.clone(),
+            ActiveRelayHandle {
+                prio_inbox_addr: r1_prio_tx,
+                inbox_addr: r1_inbox_tx,
+                datagrams_send_queue: r1_tx,
+            },
+        );
+
+        let (r2_tx, mut r2_rx) = mpsc::channel(COUNT as usize);
+        let (r2_prio_tx, _r2_prio_rx) = mpsc::channel(4);
+        let (r2_inbox_tx, _r2_inbox_rx) = mpsc::channel(4);
+        actor.active_relays.insert(
+            r2.clone(),
+            ActiveRelayHandle {
+                prio_inbox_addr: r2_prio_tx,
+                inbox_addr: r2_inbox_tx,
+                datagrams_send_queue: r2_tx,
+            },
+        );
+
+        let (_control_tx, control_rx) = mpsc::channel(4);
+        let (out_tx, out_rx) = mpsc::channel(128);
+        let task = tokio::spawn(actor.run(control_rx, out_rx));
+        let started = std::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            for number in 0..COUNT {
+                let marker = (number % 251) as u8;
+                out_tx.send(frame(&r1, marker)).await.unwrap();
+                out_tx.send(frame(&r2, marker)).await.unwrap();
+            }
+            for number in 0..COUNT {
+                let marker = (number % 251) as u8;
+                let first = r1_rx.recv().await.expect("healthy R1 closed");
+                let second = r2_rx.recv().await.expect("healthy R2 closed");
+                assert_eq!(first.datagrams, Datagrams::from(vec![marker; FRAME_BYTES]));
+                assert_eq!(second.datagrams, Datagrams::from(vec![marker; FRAME_BYTES]));
+            }
+        })
+        .await
+        .expect("two healthy relay actors stalled");
+
+        let elapsed = started.elapsed();
+        println!(
+            "STAYA_COMPARE kind={} scenario=both_healthy total_packets={} total_bytes={} elapsed_us={} packets_per_s={:.1}",
+            std::env::var("STAYA_BUILD_KIND").unwrap_or_else(|_| "unlabeled".to_string()),
+            usize::from(COUNT) * 2,
+            usize::from(COUNT) * 2 * FRAME_BYTES,
+            elapsed.as_micros(),
+            f64::from(COUNT) * 2.0 / elapsed.as_secs_f64().max(0.000_001)
+        );
+        cancel.cancel();
+        task.abort();
+        let _ = task.await;
+    }
+
     /// Abort stands in for the runtime drop that triggers this in the wild:
     /// `join_next` yields a cancelled `JoinError` either way.
     #[tokio::test]
