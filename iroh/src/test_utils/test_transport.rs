@@ -4,7 +4,7 @@
 //! using in-memory channels instead of real network transports.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io,
     sync::{Arc, Mutex},
     task::Poll,
@@ -44,6 +44,14 @@ pub struct TestTransport {
     id: EndpointId,
     id_watchable: n0_watcher::Watchable<Vec<CustomAddr>>,
     network: TestNetwork,
+}
+
+#[cfg(test)]
+impl TestTransport {
+    /// Withdraw the address advertised by this custom endpoint.
+    fn withdraw_local_addrs(&self) {
+        self.id_watchable.update(Vec::new());
+    }
 }
 
 impl Preset for Arc<TestTransport> {
@@ -119,6 +127,17 @@ impl TestNetwork {
     }
 }
 
+#[cfg(test)]
+impl TestNetwork {
+    /// Simulate a silent loss of all custom transport traffic for an endpoint.
+    ///
+    /// The network keeps its channels alive: this models an inaccessible
+    /// underlying path rather than destruction of the QUIC endpoint.
+    fn block_endpoint(&self, id: EndpointId) {
+        self.inner.lock().expect("poisoned").blocked.insert(id);
+    }
+}
+
 #[derive(Debug)]
 struct TestAddrLookup {
     network: TestNetwork,
@@ -127,6 +146,7 @@ struct TestAddrLookup {
 #[derive(Debug, Default)]
 struct TestNetworkInner {
     channels: BTreeMap<EndpointId, (mpsc::Sender<Packet>, mpsc::Receiver<Packet>)>,
+    blocked: BTreeSet<EndpointId>,
 }
 
 impl AddressLookup for TestAddrLookup {
@@ -187,6 +207,10 @@ impl TestSender {
     fn send_sync(&self, dst: &CustomAddr, packets: Vec<Packet>) -> io::Result<()> {
         let to_id = try_parse_custom_addr(dst)?;
         let guard = self.network.inner.lock().expect("poisoned");
+        if guard.blocked.contains(&self.id) || guard.blocked.contains(&to_id) {
+            // A physically withdrawn transport may silently lose a datagram.
+            return Ok(());
+        }
         let (s, _) = guard
             .channels
             .get(&to_id)
@@ -738,6 +762,68 @@ mod tests {
 
         verify_echo(&conn, b"custom wins over relay").await?;
         conn.close(0u32.into(), b"done");
+        router.shutdown().await.anyerr()?;
+        Ok(())
+    }
+
+    /// STAYA regression: an endpoint whose final custom path was withdrawn
+    /// must stop the connection promptly, rather than leaving it stalled
+    /// until the normal QUIC idle timeout. The transport becomes unusable
+    /// after a successful application-level exchange.
+    #[tokio::test]
+    #[traced_test]
+    async fn test_staya_withdrawn_custom_only_connection_exits_within_deadline() -> Result<()> {
+        let network = TestNetwork::new();
+        let s1 = SecretKey::generate();
+        let s2 = SecretKey::generate();
+        let ep1_id = s1.public();
+
+        let t1 = network.create_transport(ep1_id)?;
+        let t2 = network.create_transport(s2.public())?;
+        let ep1 = endpoint_builder(s1, t1.clone(), EndpointConfig::default())
+            .bind()
+            .await?;
+        let ep2 = endpoint_builder(s2.clone(), t2, EndpointConfig::default())
+            .bind()
+            .await?;
+        let router = Router::builder(ep2).accept(ECHO_ALPN, Echo).spawn();
+
+        let conn = ep1
+            .connect(custom_only_addr(s2.public()), ECHO_ALPN)
+            .await?;
+        verify_echo(&conn, b"custom path worked before withdrawal").await?;
+        assert!(is_custom_selected(&conn), "custom path must initially be selected");
+
+        network.block_endpoint(ep1_id);
+        t1.withdraw_local_addrs();
+
+        // First prove that the public address watcher observed the withdrawal.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if !ep1
+                    .addr()
+                    .addrs
+                    .iter()
+                    .any(|a| matches!(a, TransportAddr::Custom(_)))
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("STAYA_WITHDRAWN_ADDR_NOT_OBSERVED");
+
+        // A connection with no remaining usable path must not stay hung.
+        // 5 seconds is above the 3-second fallback found in KingYoSun's fix,
+        // but far below the usual QUIC idle timeout.
+        let result = tokio::time::timeout(Duration::from_secs(5), conn.closed()).await;
+        assert!(
+            result.is_ok(),
+            "STAYA_WITHDRAWN_CUSTOM_HUNG: last custom path was withdrawn \
+             but the connection did not close within five seconds"
+        );
+
         router.shutdown().await.anyerr()?;
         Ok(())
     }
