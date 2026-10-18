@@ -1633,12 +1633,7 @@ mod tests {
         let mut cursor = 0;
         let mut observed = std::collections::HashSet::new();
         for _ in 0..20 {
-            let targets = initial_datagram_targets(
-                None,
-                candidates.iter(),
-                |_| false,
-                &mut cursor,
-            );
+            let targets = initial_datagram_targets(None, candidates.iter(), |_| false, &mut cursor);
             assert!(targets.len() <= MAX_INITIAL_TARGETS);
             for target in targets {
                 observed.insert(target);
