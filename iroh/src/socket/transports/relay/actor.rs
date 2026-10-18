@@ -1229,7 +1229,9 @@ impl RelayActor {
         let url = item.url.clone();
         // Keep later frames in the same relay's FIFO once it is congested:
         // do not bypass an older deferred frame through the direct queue.
-        let item = if let Some(queue) = self.congested_relay_queues.get(&url) {
+        let item = if self.congested_relay_queues.is_empty() {
+            item
+        } else if let Some(queue) = self.congested_relay_queues.get(&url) {
             match queue.try_send(item) {
                 Ok(()) => return,
                 Err(mpsc::error::TrySendError::Full(_)) => {
