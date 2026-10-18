@@ -961,6 +961,13 @@ pub(crate) struct TransportsSender {
 }
 
 impl TransportsSender {
+    /// Release reservations for dropped relay sends.
+    pub(crate) fn abort_relay_sends(mut self: Pin<&mut Self>) {
+        for sender in self.relay.iter_mut() {
+            sender.abort_send();
+        }
+    }
+
     #[instrument(name = "poll_send", skip(self, cx, transmit), fields(len = transmit.contents.len()))]
     pub(crate) fn poll_send(
         mut self: Pin<&mut Self>,
@@ -1272,9 +1279,9 @@ impl noq::UdpSender for Sender {
             contents: noq_transmit.contents,
             segment_size: noq_transmit.segment_size,
         };
-        let this = self.project();
+        let mut this = self.project();
 
-        match this.sender.poll_send(cx, &network_path, &transmit) {
+        match this.sender.as_mut().poll_send(cx, &network_path, &transmit) {
             Poll::Ready(Ok(())) => {
                 trace!(
                     dst = %network_path,
@@ -1293,6 +1300,7 @@ impl noq::UdpSender for Sender {
                 // different transport.  Instead we let Noq handle this as a lost
                 // datagram.
                 // TODO: Revisit this: we might want to do something better.
+                this.sender.abort_relay_sends();
                 trace!(dst=%network_path, "transport pending, dropped transmit");
                 Poll::Ready(Ok(()))
             }
