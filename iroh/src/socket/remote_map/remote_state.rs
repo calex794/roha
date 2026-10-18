@@ -802,29 +802,15 @@ impl State {
         // though we might not have a relay transport or ip-capable transport set up.
         // So these errors must not be fatal for this actor (or even this operation).
 
-        // Handshake datagrams belong to a new connection. A selected path
-        // may still belong to an old, silently-dead connection (#4600).
-        // Prefer it first, but also send the Initial to new known paths.
-        let mut targets = SmallVec::new();
-        if let Some(selected) = self.selected_path.as_ref() {
-            targets.push(transports::FourTuple::from_remote(selected.remote()));
-        }
-        for addr in self.paths.addrs() {
-            // Never direct a handshake packet back to our own address.
-            if let transports::Addr::Ip(sockaddr) = addr
-                && self
-                    .local_direct_addrs
-                    .peek()
-                    .iter()
-                    .any(|a| a.addr == *sockaddr)
-            {
-                continue;
-            }
-            let candidate = transports::FourTuple::from_remote(addr.clone());
-            if !targets.contains(&candidate) {
-                targets.push(candidate);
-            }
-        }
+        // QUIC Initial is sent on the synthetic Mixed address before a
+        // connection has picked a real transport. Do not duplicate established
+        // application packets (those use direct relay/IP paths in Sender).
+        let local = self.local_direct_addrs.peek();
+        let targets = initial_datagram_targets(
+            self.selected_path.as_ref(),
+            self.paths.addrs(),
+            |ip| local.iter().any(|addr| addr.addr == *ip),
+        );
 
         if targets.is_empty() {
             return;
@@ -1138,6 +1124,37 @@ fn send_datagram<'a>(
             .poll_send(cx, &addr, &transmit)
             .map(|res| res.with_context(|_| format!("failed to send datagram to {:?}", addr)))
     })
+}
+
+/// Enumerate destinations only for QUIC Initial packets. A selected route
+/// belongs to a *previous* connection and might no longer reach this peer.
+/// Prefer it, but also try newly discovered routes without duplicate sends.
+/// Never reflect packets back to one of our own direct addresses.
+fn initial_datagram_targets<'a>(
+    selected: Option<&transports::FourTuple>,
+    candidates: impl Iterator<Item = &'a transports::Addr>,
+    is_local_ip: impl Fn(&std::net::SocketAddr) -> bool,
+) -> SmallVec<[transports::FourTuple; 8]> {
+    let mut targets = SmallVec::new();
+    let mut push = |remote: transports::Addr| {
+        if let transports::Addr::Ip(ip) = &remote
+            && is_local_ip(ip)
+        {
+            return;
+        }
+        let path = transports::FourTuple::from_remote(remote);
+        if !targets.contains(&path) {
+            targets.push(path);
+        }
+    };
+
+    if let Some(selected) = selected {
+        push(selected.remote());
+    }
+    for candidate in candidates {
+        push(candidate.clone());
+    }
+    targets
 }
 
 async fn send_datagram_to_targets(
@@ -1551,6 +1568,46 @@ async fn maybe_next<S: Stream + Unpin>(maybe_stream: Option<&mut S>) -> Option<O
 #[cfg(all(test, not(wasm_browser)))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initial_targets_prefer_selected_and_deduplicate_new_relay() {
+        let peer = iroh_base::SecretKey::from_bytes(&[2; 32]).public();
+        let relay_a = transports::Addr::Relay(
+            "https://relay-a.example.invalid".parse().unwrap(),
+            peer,
+        );
+        let relay_b = transports::Addr::Relay(
+            "https://relay-b.example.invalid".parse().unwrap(),
+            peer,
+        );
+        let selected = transports::FourTuple::from_remote(relay_a.clone());
+        let targets = initial_datagram_targets(
+            Some(&selected),
+            [&relay_a, &relay_b, &relay_a, &relay_b].into_iter(),
+            |_| false,
+        );
+
+        assert_eq!(
+            targets.as_slice(),
+            &[
+                selected,
+                transports::FourTuple::from_remote(relay_b),
+            ]
+        );
+    }
+
+    #[test]
+    fn initial_targets_refuse_self_address_and_duplicate_direct_path() {
+        let own = transports::Addr::Ip(([127, 0, 0, 1], 9000).into());
+        let remote = transports::Addr::Ip(([192, 0, 2, 10], 9001).into());
+        let selected = transports::FourTuple::from_remote(remote.clone());
+        let targets = initial_datagram_targets(
+            Some(&selected),
+            [&own, &remote, &own, &remote].into_iter(),
+            |addr| *addr == ([127, 0, 0, 1], 9000).into(),
+        );
+        assert_eq!(targets.as_slice(), &[selected]);
+    }
 
     #[tokio::test]
     async fn blocked_relay_does_not_delay_direct_initial() {
