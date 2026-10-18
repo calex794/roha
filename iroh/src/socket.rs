@@ -975,6 +975,7 @@ impl EndpointInner {
             RemoteMap::new(
                 metrics.socket.clone(),
                 direct_addrs.addrs.watch(),
+                transports.custom_addrs_watch(),
                 address_lookup.clone(),
                 shutdown_token.child_token(),
                 path_selector,
