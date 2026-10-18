@@ -1,0 +1,57 @@
+name: Staya Iroh patch audit publish recovery
+on:
+  push:
+    branches:
+      - lab/staya-iroh-fork-census-20261019
+    paths:
+      - .github/workflows/staya-iroh-patch-publish-recovery.yml
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: staya-iroh-patch-publish-recovery
+  cancel-in-progress: false
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: true
+      - name: Retrieve all completed scan artifacts from run 39164490454
+        uses: actions/download-artifact@v4
+        with:
+          run-id: 39164490454
+          github-token: ${{ github.token }}
+          pattern: staya-patch-shard-*
+          merge-multiple: true
+          path: docs/staya/iroh-fork-census/2026-10-18/patch-audit
+      - name: Check coverage and aggregate
+        run: python3 tools/staya/iroh_patch_audit.py --aggregate --shards 8
+      - name: Commit results against freshest lab branch
+        run: |
+          set -eu
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/staya/iroh-fork-census/2026-10-18
+          if git diff --cached --quiet; then
+            echo 'No report changes'
+          else
+            git commit -m 'data(staya): publish normalized Iroh patch audit'
+            git fetch origin lab/staya-iroh-fork-census-20261019
+            git rebase origin/lab/staya-iroh-fork-census-20261019
+            git push origin HEAD:lab/staya-iroh-fork-census-20261019
+          fi
+      - name: Preserve summary on any publication failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02b
+        with:
+          name: staya-iroh-patch-final-recovery
+          path: |
+            docs/staya/iroh-fork-census/2026-10-18/PATCH-SUMMARY.md
+            docs/staya/iroh-fork-census/2026-10-18/patch_branch_audit.csv
+            docs/staya/iroh-fork-census/2026-10-18/patch_commit_index.csv
+            docs/staya/iroh-fork-census/2026-10-18/patch_network_clusters.csv
+          if-no-files-found: warn
