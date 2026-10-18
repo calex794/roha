@@ -1,0 +1,83 @@
+name: Staya Iroh normalized patch audit
+on:
+  push:
+    branches:
+      - lab/staya-iroh-fork-census-20261019
+    paths:
+      - .github/workflows/staya-iroh-patch-audit.yml
+      - tools/staya/iroh_patch_audit.py
+      - tools/staya/tests/test_iroh_patch_audit.py
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: staya-iroh-patch-audit
+  cancel-in-progress: false
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Verify patch-id equivalence and path categorization
+        run: python3 -m unittest discover -s tools/staya/tests -p test_iroh_patch_audit.py -v
+  scan:
+    needs: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Audit branch heads and changes (sharded)
+        env:
+          GIT_TERMINAL_PROMPT: '0'
+          PYTHONUNBUFFERED: '1'
+        run: |
+          python3 tools/staya/iroh_patch_audit.py --shards 8 --shard ${{ matrix.shard }}
+      - name: Persist individual shard output
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02b
+        with:
+          name: staya-patch-shard-${{ matrix.shard }}
+          path: docs/staya/iroh-fork-census/2026-10-18/patch-audit
+          if-no-files-found: warn
+  aggregate:
+    needs: scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: true
+      - name: Merge all shard data
+        uses: actions/download-artifact@v4
+        with:
+          pattern: staya-patch-shard-*
+          merge-multiple: true
+          path: docs/staya/iroh-fork-census/2026-10-18/patch-audit
+      - name: Verify complete 1762 SHA coverage and group patches
+        run: python3 tools/staya/iroh_patch_audit.py --aggregate --shards 8
+      - name: Save reviewable results on isolated branch
+        run: |
+          set -eu
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/staya/iroh-fork-census/2026-10-18
+          if ! git diff --cached --quiet; then
+            git commit -m 'data(staya): group Iroh fork branch patch equivalents'
+            git push origin HEAD:lab/staya-iroh-fork-census-20261019
+          fi
+      - name: Upload final report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02b
+        with:
+          name: staya-iroh-patch-audit
+          path: |
+            docs/staya/iroh-fork-census/2026-10-18/PATCH-SUMMARY.md
+            docs/staya/iroh-fork-census/2026-10-18/patch_branch_audit.csv
+            docs/staya/iroh-fork-census/2026-10-18/patch_commit_index.csv
+            docs/staya/iroh-fork-census/2026-10-18/patch_network_clusters.csv
+          if-no-files-found: error
