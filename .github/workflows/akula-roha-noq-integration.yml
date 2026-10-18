@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - "integration/roha-noq-forks-*"
+      - "repro/iroh-4600-*"
   workflow_dispatch:
 permissions:
   contents: read
@@ -48,6 +49,9 @@ jobs:
         uses: taiki-e/install-action@b20dedce73af6905cdc30d6611090c9b67557c8d
         with:
           tool: nextest@0.9.80
+      - name: Reproduce Iroh #4600 with pinned noq
+        run: |
+          cargo test --locked -p iroh --lib reconnect_after_peer_restarts_on_new_relay -- --nocapture --test-threads=1
       - name: LAN and relay regression suite
         run: |
           cargo nextest run --locked -p iroh --test patchbay --profile patchbay -E 'test(lan_switch_advertises_new_addr_without_relay) | test(lan_repeated_switch_without_relay) | test(relay_connect_ipv4) | test(relay_udp_blocked_both) | test(relay_reconnect_link_outage_client) | test(holepunch_simple)' --no-fail-fast
