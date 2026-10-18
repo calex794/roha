@@ -4,6 +4,7 @@ on:
     branches:
       - "integration/roha-noq-forks-*"
       - "repro/iroh-4600-*"
+      - "fix/iroh-4600-*"
   workflow_dispatch:
 permissions:
   contents: read
