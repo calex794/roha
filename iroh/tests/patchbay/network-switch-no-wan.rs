@@ -102,7 +102,6 @@ async fn lan_switch_advertises_new_addr_without_relay() -> Result {
     Ok(())
 }
 
-
 /// Regression stress: a single endpoint changes LAN six times with relays disabled.
 ///
 /// In addition to the A->B->C test, verify repeated publication and removal of
@@ -112,10 +111,29 @@ async fn lan_switch_advertises_new_addr_without_relay() -> Result {
 #[traced_test]
 async fn lan_repeated_switch_without_relay() -> Result {
     let (lab, _guard) = Lab::for_test(testdir!()).await?;
-    let lan_a = lab.add_router("stress-lan-a").preset(RouterPreset::Home).build().await?.id();
-    let lan_b = lab.add_router("stress-lan-b").preset(RouterPreset::Home).build().await?.id();
-    let lan_c = lab.add_router("stress-lan-c").preset(RouterPreset::Home).build().await?.id();
-    let device = lab.add_device("stress-device").uplink(lan_a).build().await?;
+    let lan_a = lab
+        .add_router("stress-lan-a")
+        .preset(RouterPreset::Home)
+        .build()
+        .await?
+        .id();
+    let lan_b = lab
+        .add_router("stress-lan-b")
+        .preset(RouterPreset::Home)
+        .build()
+        .await?
+        .id();
+    let lan_c = lab
+        .add_router("stress-lan-c")
+        .preset(RouterPreset::Home)
+        .build()
+        .await?
+        .id();
+    let device = lab
+        .add_device("stress-device")
+        .uplink(lan_a)
+        .build()
+        .await?;
 
     let task = device.spawn(move |dev| async move {
         let ep = Endpoint::builder(presets::Minimal)
