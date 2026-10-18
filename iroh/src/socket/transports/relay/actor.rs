@@ -1531,6 +1531,100 @@ mod tests {
     };
     use crate::{dns::DnsResolver, metrics::SocketMetrics, test_utils};
 
+    /// A deterministic two-relay regression for upstream Iroh #4603.
+    ///
+    /// R1 has a full channel whose receiver deliberately never drains.
+    /// R2 is healthy, so a frame directed at R2 must still reach its own
+    /// channel. This exercises the REAL RelayActor::run dispatch loop, but
+    /// substitutes in-memory channels for physical relay servers.
+    async fn relay_hol_scenario(r1_stalled: bool) -> bool {
+        use super::ActiveRelayHandle;
+
+        let r1: RelayUrl = "https://relay-one.example.invalid".parse().unwrap();
+        let r2: RelayUrl = "https://relay-two.example.invalid".parse().unwrap();
+        let peer = SecretKey::from_bytes(&[91u8; 32]).public();
+        let frame = |url: RelayUrl| RelaySendItem {
+            remote_endpoint: peer,
+            url,
+            datagrams: Datagrams::from(b"synthetic-datagram"),
+        };
+
+        let config = Config {
+            my_relay: Default::default(),
+            secret_key: SecretKey::from_bytes(&[92u8; 32]),
+            dns_resolver: DnsResolver::new(),
+            proxy_url: None,
+            ipv6_reported: Arc::new(AtomicBool::new(false)),
+            tls_config: CaTlsConfig::insecure_skip_verify()
+                .client_config(default_provider())
+                .expect("infallible"),
+            metrics: Default::default(),
+            relay_map: RelayMap::empty(),
+        };
+        let (received_tx, _received_rx) = mpsc::channel(4);
+        let stop = CancellationToken::new();
+        let mut actor = RelayActor::new(config, received_tx, stop.clone());
+
+        let (r1_tx, _r1_rx) = mpsc::channel(1);
+        let (r1_prio_tx, _r1_prio_rx) = mpsc::channel(4);
+        let (r1_inbox_tx, _r1_inbox_rx) = mpsc::channel(4);
+        if r1_stalled {
+            r1_tx.try_send(frame(r1.clone())).expect("fill stalled R1");
+        }
+        actor.active_relays.insert(
+            r1.clone(),
+            ActiveRelayHandle {
+                prio_inbox_addr: r1_prio_tx,
+                inbox_addr: r1_inbox_tx,
+                datagrams_send_queue: r1_tx,
+            },
+        );
+
+        let (r2_tx, mut r2_rx) = mpsc::channel(1);
+        let (r2_prio_tx, _r2_prio_rx) = mpsc::channel(4);
+        let (r2_inbox_tx, _r2_inbox_rx) = mpsc::channel(4);
+        actor.active_relays.insert(
+            r2.clone(),
+            ActiveRelayHandle {
+                prio_inbox_addr: r2_prio_tx,
+                inbox_addr: r2_inbox_tx,
+                datagrams_send_queue: r2_tx,
+            },
+        );
+
+        let (_control_tx, control_rx) = mpsc::channel(4);
+        let (out_tx, out_rx) = mpsc::channel(8);
+        let runner = tokio::spawn(actor.run(control_rx, out_rx));
+        out_tx.send(frame(r1)).await.expect("R1 outgoing queue open");
+        out_tx.send(frame(r2)).await.expect("R2 outgoing queue open");
+
+        let healthy_frame = tokio::time::timeout(Duration::from_millis(500), r2_rx.recv())
+            .await
+            .ok()
+            .flatten();
+        // Clean up even on RED failure: never leave a Tokio task running.
+        stop.cancel();
+        runner.abort();
+        let _ = runner.await;
+        healthy_frame.is_some()
+    }
+
+    #[tokio::test]
+    async fn two_healthy_relay_queues_progress_independently() {
+        assert!(
+            relay_hol_scenario(false).await,
+            "healthy R2 must receive while R1 queue is available"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_stuck_relay_queue_must_not_block_healthy_relay() {
+        assert!(
+            relay_hol_scenario(true).await,
+            "healthy R2 blocked by R1's full outgoing queue (iroh #4603)"
+        );
+    }
+
     /// Abort stands in for the runtime drop that triggers this in the wild:
     /// `join_next` yields a cancelled `JoinError` either way.
     #[tokio::test]
