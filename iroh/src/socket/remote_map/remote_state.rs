@@ -806,11 +806,10 @@ impl State {
         // connection has picked a real transport. Do not duplicate established
         // application packets (those use direct relay/IP paths in Sender).
         let local = self.local_direct_addrs.peek();
-        let targets = initial_datagram_targets(
-            self.selected_path.as_ref(),
-            self.paths.addrs(),
-            |ip| local.iter().any(|addr| addr.addr == *ip),
-        );
+        let targets =
+            initial_datagram_targets(self.selected_path.as_ref(), self.paths.addrs(), |ip| {
+                local.iter().any(|addr| addr.addr == *ip)
+            });
 
         if targets.is_empty() {
             return;
@@ -1572,14 +1571,10 @@ mod tests {
     #[test]
     fn initial_targets_prefer_selected_and_deduplicate_new_relay() {
         let peer = iroh_base::SecretKey::from_bytes(&[2; 32]).public();
-        let relay_a = transports::Addr::Relay(
-            "https://relay-a.example.invalid".parse().unwrap(),
-            peer,
-        );
-        let relay_b = transports::Addr::Relay(
-            "https://relay-b.example.invalid".parse().unwrap(),
-            peer,
-        );
+        let relay_a =
+            transports::Addr::Relay("https://relay-a.example.invalid".parse().unwrap(), peer);
+        let relay_b =
+            transports::Addr::Relay("https://relay-b.example.invalid".parse().unwrap(), peer);
         let selected = transports::FourTuple::from_remote(relay_a.clone());
         let targets = initial_datagram_targets(
             Some(&selected),
@@ -1589,10 +1584,7 @@ mod tests {
 
         assert_eq!(
             targets.as_slice(),
-            &[
-                selected,
-                transports::FourTuple::from_remote(relay_b),
-            ]
+            &[selected, transports::FourTuple::from_remote(relay_b),]
         );
     }
 
