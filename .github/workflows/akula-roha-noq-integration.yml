@@ -23,6 +23,11 @@ jobs:
           cargo tree -p iroh -i noq
           cargo tree -p iroh -i noq-proto
           cargo tree -p iroh -i noq-udp
+      - name: Show exact Cargo.lock changes for review
+        run: |
+          echo AKULA_LOCK_DIFF_START
+          git -c color.ui=false --no-pager diff --no-ext-diff -- Cargo.lock
+          echo AKULA_LOCK_DIFF_END
       - name: Check Roha against forked noq
         run: cargo check --locked -p iroh
       - name: Test Roha library
