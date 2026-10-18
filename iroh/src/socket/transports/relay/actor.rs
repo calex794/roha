@@ -1773,7 +1773,9 @@ mod tests {
         send_tx
             .try_send(congested_frame(&url, peer, 0))
             .expect("prefill R1");
-        actor.try_send_datagram(congested_frame(&url, peer, 1)).await;
+        actor
+            .try_send_datagram(congested_frame(&url, peer, 1))
+            .await;
         wait_for_congested_worker(&actor, &url).await;
         for marker in 2..=4 {
             actor
@@ -1799,7 +1801,9 @@ mod tests {
         send_tx
             .try_send(congested_frame(&url, peer, 0))
             .expect("prefill R1");
-        actor.try_send_datagram(congested_frame(&url, peer, 1)).await;
+        actor
+            .try_send_datagram(congested_frame(&url, peer, 1))
+            .await;
         wait_for_congested_worker(&actor, &url).await;
         // The first deferred frame belongs to the worker and 32 further
         // frames may occupy its channel. All later frames must be dropped.
@@ -1832,7 +1836,9 @@ mod tests {
     fn completed_old_relay_worker_cannot_remove_live_replacement_queue() {
         let (mut actor, url, _peer, _tx, _rx) = congested_test_actor();
         let (live_sender, live_receiver) = mpsc::channel::<RelaySendItem>(1);
-        actor.congested_relay_queues.insert(url.clone(), live_sender);
+        actor
+            .congested_relay_queues
+            .insert(url.clone(), live_sender);
         // The old worker's join result arrives after its queue was replaced.
         actor.reap_congested_relay(&url);
         assert!(actor.congested_relay_queues.contains_key(&url));
