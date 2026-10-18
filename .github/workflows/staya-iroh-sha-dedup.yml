@@ -1,0 +1,48 @@
+name: Staya Iroh branch SHA deduplication
+on:
+  push:
+    branches:
+      - lab/staya-iroh-fork-census-20261019
+    paths:
+      - .github/workflows/staya-iroh-sha-dedup.yml
+      - tools/staya/iroh_branch_sha_dedup.py
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: staya-iroh-branch-shas
+  cancel-in-progress: false
+jobs:
+  deduplicate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: true
+      - name: Confirm prior census and branch inventory
+        run: |
+          test -s docs/staya/iroh-fork-census/2026-10-18/all_forks.csv
+          test -s docs/staya/iroh-fork-census/2026-10-18/branch_inventory.csv
+      - name: Gather and deduplicate all official fork branch HEAD SHAs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PYTHONUNBUFFERED: "1"
+        run: python3 tools/staya/iroh_branch_sha_dedup.py
+      - name: Commit results to isolated research branch
+        run: |
+          set -eu
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/staya/iroh-fork-census/2026-10-18
+          if ! git diff --cached --quiet; then
+            git commit -m "data(staya): deduplicate Iroh fork branch heads"
+            git push origin HEAD:lab/staya-iroh-fork-census-20261019
+          fi
+      - name: Archive SHA reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02b
+        with:
+          name: staya-iroh-sha-dedup
+          path: docs/staya/iroh-fork-census/2026-10-18
+          if-no-files-found: warn
