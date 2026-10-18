@@ -33,4 +33,4 @@ jobs:
           RUST_BACKTRACE: "1"
           RUST_LOG: "info"
         run: |
-          cargo nextest run --locked -p iroh --test patchbay --profile patchbay -E 'test(lan_switch_advertises_new_addr_without_relay)' --no-fail-fast
+          cargo nextest run --locked -p iroh --test patchbay --profile patchbay -E 'test(lan_switch_advertises_new_addr_without_relay) | test(lan_repeated_switch_without_relay)' --no-fail-fast
