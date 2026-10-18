@@ -63,6 +63,10 @@ jobs:
         run: cargo +1.91.0 test --locked -p iroh --features unstable-custom-transports,test-utils --lib test_staya_withdrawn_custom_falls_back_to_established_relay -- --nocapture
         env:
           RUST_BACKTRACE: "1"
+      - name: Verify recovered custom path is reselected on same connection
+        run: cargo +1.91.0 test --locked -p iroh --features unstable-custom-transports,test-utils --lib test_staya_recovered_custom_reselected_without_reconnect -- --nocapture
+        env:
+          RUST_BACKTRACE: "1"
       - name: Persist resolved lockfile even on red test
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02b
