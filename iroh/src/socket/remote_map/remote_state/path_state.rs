@@ -183,6 +183,21 @@ impl RemotePathState {
         self.paths.keys()
     }
 
+    /// Candidate routes sorted by the most recent observation, not FxHashMap
+    /// iteration order. A new app-provided relay must not be hidden behind
+    /// many stale entries when QUIC Initial fanout is bounded (#4600).
+    ///
+    /// Ties use address order so tests and repeated attempts are deterministic.
+    pub(super) fn addrs_recent_first(&self) -> Vec<&transports::Addr> {
+        let mut entries: Vec<_> = self.paths.iter().collect();
+        entries.sort_unstable_by(|(addr_a, state_a), (addr_b, state_b)| {
+            let recent_a = state_a.sources.values().max();
+            let recent_b = state_b.sources.values().max();
+            recent_b.cmp(&recent_a).then_with(|| addr_a.cmp(addr_b))
+        });
+        entries.into_iter().map(|(addr, _)| addr).collect()
+    }
+
     /// Returns whether this stores any addresses.
     pub(super) fn is_empty(&self) -> bool {
         self.paths.is_empty()
@@ -553,6 +568,29 @@ mod tests {
             paths.len(),
             "should keep MAX_NON_RELAY_PATHS when all paths failed"
         );
+    }
+
+    #[test]
+    fn new_relay_address_is_ranked_before_stale_paths() {
+        let mut state = RemotePathState::new(Default::default());
+        let stale = Instant::now() - Duration::from_secs(180);
+        for port in 7000..7025 {
+            let addr = ip_addr(port);
+            state.insert_multiple([addr.clone()].into_iter(), Source::App);
+            state
+                .paths
+                .get_mut(&addr)
+                .unwrap()
+                .sources
+                .insert(Source::App, stale);
+        }
+        let fresh = ip_addr(8200);
+        state.insert_multiple([fresh.clone()].into_iter(), Source::App);
+        let sorted = state.addrs_recent_first();
+        assert_eq!(sorted.len(), 26);
+        assert_eq!(*sorted[0], fresh);
+        // Sorting must not delete the remaining candidates needed for retries.
+        assert!(sorted.contains(&&ip_addr(7000)));
     }
 
     #[test]
