@@ -3,6 +3,10 @@ on:
   push:
     branches:
       - lab/staya-noq-1-4-upgrade-20261019
+    paths:
+      - '**/Cargo.toml'
+      - 'iroh/src/test_utils/test_transport.rs'
+      - '.github/workflows/staya-noq-current-verification.yml'
   workflow_dispatch:
 permissions:
   contents: write
@@ -37,6 +41,18 @@ jobs:
               assert p.get("source", "").startswith("git+https://github.com/calex794/noq.git"), (name, p.get("source"))
               print(name, p["version"], p["source"])
           PY
+      - name: Save verified fork lockfile on lab branch
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Cargo.lock
+          if ! git diff --cached --quiet; then
+            git commit -m 'build(staya): lock current calex794/noq 1.4 revision'
+            git fetch origin lab/staya-noq-1-4-upgrade-20261019
+            git rebase origin/lab/staya-noq-1-4-upgrade-20261019
+            git push origin HEAD:lab/staya-noq-1-4-upgrade-20261019
+          fi
       - name: Compile and execute withdrawal regression
         run: cargo +1.91.0 test --locked -p iroh --features unstable-custom-transports,test-utils --lib test_staya_withdrawn_custom_only_connection_exits_within_deadline -- --nocapture
         env:
