@@ -6,7 +6,7 @@ use std::{
     task::Poll,
 };
 
-use iroh_base::{EndpointId, TransportAddr};
+use iroh_base::{CustomAddr, EndpointId, TransportAddr};
 use n0_error::StackResultExt;
 use n0_future::{
     FuturesUnordered, FuturesUnorderedBounded, MaybeFuture, MergeUnbounded, Stream, StreamExt,
@@ -76,6 +76,7 @@ const ACTOR_MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 // QUIC retransmits dropped Initials; a blocked transport must not retain them indefinitely.
 const DATAGRAM_SEND_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_DATAGRAM_SEND_TASKS: usize = 16;
+const STAYA_WITHDRAWN_PATH_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// A stream of events from all paths for all connections.
 ///
@@ -123,6 +124,7 @@ struct State {
     ///
     /// These are our local addresses and any reflexive transport addresses.
     local_direct_addrs: n0_watcher::Direct<BTreeSet<DirectAddr>>,
+    local_custom_addrs: transports::CustomTransportsWatcher,
     /// The mapped addresses for this endpoint.
     mapped_addrs: MappedAddrs,
     /// Address lookup service, cloned from the socket.
@@ -164,6 +166,7 @@ struct State {
     ///
     /// They failed to open because we did not have enough CIDs issued by the remote.
     pending_open_paths: VecDeque<transports::FourTuple>,
+    stuck_custom_connections: FxHashMap<ConnId, Instant>,
 
     // Internal state - address lookup
     //
@@ -179,6 +182,7 @@ impl RemoteStateActor {
     pub(super) fn new(
         endpoint_id: EndpointId,
         local_direct_addrs: n0_watcher::Direct<BTreeSet<DirectAddr>>,
+        local_custom_addrs: transports::CustomTransportsWatcher,
         mapped_addrs: MappedAddrs,
         metrics: Arc<SocketMetrics>,
         address_lookup: AddressLookupServices,
@@ -190,6 +194,7 @@ impl RemoteStateActor {
                 endpoint_id,
                 metrics: metrics.clone(),
                 local_direct_addrs,
+                local_custom_addrs,
                 mapped_addrs,
                 address_lookup,
                 connections_close: Default::default(),
@@ -201,6 +206,7 @@ impl RemoteStateActor {
                 scheduled_holepunch: None,
                 scheduled_open_path: None,
                 pending_open_paths: VecDeque::new(),
+                stuck_custom_connections: FxHashMap::default(),
                 address_lookup_stream: None,
                 path_selector,
             },
@@ -262,6 +268,11 @@ impl RemoteStateActor {
                 None => MaybeFuture::None,
             };
             n0_future::pin!(scheduled_hp);
+            let stuck_timer = match self.state.stuck_custom_connections.values().min() {
+                Some(t) => MaybeFuture::Some(time::sleep_until(*t)),
+                None => MaybeFuture::None,
+            };
+            n0_future::pin!(stuck_timer);
             if !self.is_idle(&inbox) {
                 idle_timeout
                     .as_mut()
@@ -301,6 +312,11 @@ impl RemoteStateActor {
                     trace!("local addrs updated, triggering holepunching");
                     self.trigger_holepunching();
                 }
+                res = self.state.local_custom_addrs.updated() => {
+                    if res.is_err() { break; }
+                    self.on_custom_addresses_changed();
+                }
+                _ = &mut stuck_timer => { self.close_stuck_custom_connections(); }
                 _ = &mut scheduled_path_open => {
                     trace!("triggering scheduled path_open");
                     self.state.scheduled_open_path = None;
@@ -481,6 +497,7 @@ impl RemoteStateActor {
             reason=?closed.reason,
         );
 
+        self.state.stuck_custom_connections.remove(&conn_id);
         if let Some(conn_state) = self.connections.remove(&conn_id) {
             self.state.metrics.num_conns_closed.inc();
             conn_state.path_state.close(closed);
@@ -596,6 +613,7 @@ impl RemoteStateActor {
                 self.state
                     .register_and_configure_path(conn_id, conn_state, &path);
                 self.select_path();
+                self.on_custom_addresses_changed();
             }
             NoqPathEvent::Abandoned { id, reason, .. } => {
                 // Remove abandoned path from the conn state.
@@ -645,15 +663,58 @@ impl RemoteStateActor {
         }
     }
 
+
+    fn on_custom_addresses_changed(&mut self) {
+        let live: BTreeSet<CustomAddr> = self.state.local_custom_addrs.clone().get().into_iter().flatten().collect();
+        for (id, state) in &self.connections {
+            let Some(conn) = state.handle.upgrade() else { continue; };
+            let withdrawn = state.paths.values().any(|p| is_withdrawn_custom(p, &live));
+            let alternate = state.paths.values().any(|p| !is_withdrawn_custom(p, &live));
+            if withdrawn && !alternate {
+                self.state.stuck_custom_connections.entry(*id)
+                    .or_insert_with(|| Instant::now() + STAYA_WITHDRAWN_PATH_TIMEOUT);
+            } else {
+                self.state.stuck_custom_connections.remove(id);
+                if withdrawn {
+                    for (pid, tuple) in &state.paths {
+                        if is_withdrawn_custom(tuple, &live) {
+                            if let Some(path) = conn.path(*pid) { let _ = path.close(); }
+                        }
+                    }
+                }
+            }
+        }
+        self.select_path();
+    }
+
+    fn close_stuck_custom_connections(&mut self) {
+        let now = Instant::now();
+        let live: BTreeSet<CustomAddr> = self.state.local_custom_addrs.clone().get().into_iter().flatten().collect();
+        let due: Vec<_> = self.state.stuck_custom_connections.iter()
+            .filter(|(_, deadline)| **deadline <= now).map(|(id, _)| *id).collect();
+        for id in due {
+            self.state.stuck_custom_connections.remove(&id);
+            if let Some(state) = self.connections.get(&id) {
+                if !state.paths.is_empty() && state.paths.values().all(|p| is_withdrawn_custom(p, &live)) {
+                    if let Some(conn) = state.handle.upgrade() {
+                        conn.close(0u32.into(), b"custom path withdrawn");
+                    }
+                }
+            }
+        }
+    }
+
     /// Selects the preferred path by invoking the configured [`PathSelector`].
     ///
     /// The selected path is added to any connections which do not yet have it.  Any unused
     /// direct paths are closed for all connections.
     #[instrument(skip_all)]
     fn select_path(&mut self) {
+        let live: BTreeSet<CustomAddr> = self.state.local_custom_addrs.clone().get().into_iter().flatten().collect();
+        if self.state.selected_path.as_ref().is_some_and(|p| is_withdrawn_custom(p, &live)) { self.state.selected_path = None; }
         let current_path = self.state.selected_path.as_ref();
         let selected_addr = {
-            let ctx = PathSelectionContext::new(current_path, &self.connections);
+            let ctx = PathSelectionContext::new(current_path, &self.connections, &live);
             self.state.path_selector.select(&ctx).selected().cloned()
         };
 
@@ -1335,7 +1396,7 @@ pub struct PathSelectionContext<'a> {
 /// (for unit-testing selectors).
 #[derive(Debug)]
 enum PathsSource<'a> {
-    Live(&'a FxHashMap<ConnId, ConnectionState>),
+    Live(&'a FxHashMap<ConnId, ConnectionState>, &'a BTreeSet<CustomAddr>),
     #[cfg(test)]
     Test(Vec<PathSelectionData<'a>>),
 }
@@ -1345,10 +1406,11 @@ impl<'a> PathSelectionContext<'a> {
     fn new(
         current: Option<&'a transports::FourTuple>,
         connections: &'a FxHashMap<ConnId, ConnectionState>,
+        live: &'a BTreeSet<CustomAddr>,
     ) -> Self {
         Self {
             current,
-            source: PathsSource::Live(connections),
+            source: PathsSource::Live(connections, live),
         }
     }
 
@@ -1375,12 +1437,12 @@ impl<'a> PathSelectionContext<'a> {
     /// connections to the remote.  Selectors that care should aggregate as appropriate.
     pub fn paths(&self) -> Box<dyn Iterator<Item = PathSelectionData<'a>> + '_> {
         match &self.source {
-            PathsSource::Live(connections) => Box::new(
+            PathsSource::Live(connections, live) => Box::new(
                 connections
                     .values()
                     .filter_map(|state| state.handle.upgrade().map(|conn| (state, conn)))
                     .flat_map(|(state, conn)| {
-                        state.paths.iter().map(move |(path_id, addr)| {
+                        state.paths.iter().filter(move |(_, addr)| !is_withdrawn_custom(addr, live)).map(move |(path_id, addr)| {
                             PathSelectionData::live(addr, *path_id, conn.clone())
                         })
                     }),
@@ -1616,4 +1678,8 @@ mod tests {
             }
         }
     }
+}
+
+fn is_withdrawn_custom(path: &transports::FourTuple, live: &BTreeSet<CustomAddr>) -> bool {
+    matches!(path, transports::FourTuple::Custom { local: Some(addr), .. } if !live.contains(addr))
 }
