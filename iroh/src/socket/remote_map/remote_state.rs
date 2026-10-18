@@ -164,6 +164,8 @@ struct State {
     ///
     /// They failed to open because we did not have enough CIDs issued by the remote.
     pending_open_paths: VecDeque<transports::FourTuple>,
+    /// Next index in the older QUIC Initial candidate ring.
+    initial_route_cursor: usize,
 
     // Internal state - address lookup
     //
@@ -201,6 +203,7 @@ impl RemoteStateActor {
                 scheduled_holepunch: None,
                 scheduled_open_path: None,
                 pending_open_paths: VecDeque::new(),
+                initial_route_cursor: 0,
                 address_lookup_stream: None,
                 path_selector,
             },
@@ -806,10 +809,13 @@ impl State {
         // connection has picked a real transport. Do not duplicate established
         // application packets (those use direct relay/IP paths in Sender).
         let local = self.local_direct_addrs.peek();
-        let targets =
-            initial_datagram_targets(self.selected_path.as_ref(), self.paths.addrs(), |ip| {
-                local.iter().any(|addr| addr.addr == *ip)
-            });
+        let candidates = self.paths.addrs_recent_first();
+        let targets = initial_datagram_targets(
+            self.selected_path.as_ref(),
+            candidates.into_iter(),
+            |ip| local.iter().any(|addr| addr.addr == *ip),
+            &mut self.initial_route_cursor,
+        );
 
         if targets.is_empty() {
             return;
@@ -1129,12 +1135,19 @@ fn send_datagram<'a>(
 /// belongs to a *previous* connection and might no longer reach this peer.
 /// Prefer it, but also try newly discovered routes without duplicate sends.
 /// Never reflect packets back to one of our own direct addresses.
+/// Upper bound on how many paths get a copy of one QUIC Initial packet.
+const MAX_INITIAL_TARGETS: usize = 8;
+
+/// The selected path takes one slot. Recent routes take priority on the first
+/// attempt; each subsequent Initial rotates through *all* remaining routes.
 fn initial_datagram_targets<'a>(
     selected: Option<&transports::FourTuple>,
     candidates: impl Iterator<Item = &'a transports::Addr>,
     is_local_ip: impl Fn(&std::net::SocketAddr) -> bool,
+    cursor: &mut usize,
 ) -> SmallVec<[transports::FourTuple; 8]> {
     let mut targets = SmallVec::new();
+    let mut remaining = Vec::new();
     let mut push = |remote: transports::Addr| {
         if let transports::Addr::Ip(ip) = &remote
             && is_local_ip(ip)
@@ -1142,17 +1155,30 @@ fn initial_datagram_targets<'a>(
             return;
         }
         let path = transports::FourTuple::from_remote(remote);
-        if !targets.contains(&path) {
-            targets.push(path);
+        if !targets.contains(&path) && !remaining.contains(&path) {
+            remaining.push(path);
         }
     };
 
     if let Some(selected) = selected {
         push(selected.remote());
+        if !remaining.is_empty() {
+            targets.push(remaining.remove(0));
+        }
     }
     for candidate in candidates {
         push(candidate.clone());
     }
+    if remaining.is_empty() {
+        *cursor = 0;
+        return targets;
+    }
+    let available = MAX_INITIAL_TARGETS.saturating_sub(targets.len());
+    let start = *cursor % remaining.len();
+    for i in 0..available.min(remaining.len()) {
+        targets.push(remaining[(start + i) % remaining.len()].clone());
+    }
+    *cursor = (start + available.min(remaining.len())) % remaining.len();
     targets
 }
 
@@ -1580,6 +1606,7 @@ mod tests {
             Some(&selected),
             [&relay_a, &relay_b, &relay_a, &relay_b].into_iter(),
             |_| false,
+            &mut 0,
         );
 
         assert_eq!(
@@ -1597,8 +1624,31 @@ mod tests {
             Some(&selected),
             [&own, &remote, &own, &remote].into_iter(),
             |addr| *addr == ([127, 0, 0, 1], 9000).into(),
+            &mut 0,
         );
         assert_eq!(targets.as_slice(), &[selected]);
+    }
+
+    #[test]
+    fn initial_fanout_is_bounded_and_rotates_over_stale_candidates() {
+        let candidates: Vec<_> = (1000..1100)
+            .map(|port| transports::Addr::Ip(([192, 0, 2, 1], port).into()))
+            .collect();
+        let mut cursor = 0;
+        let mut observed = std::collections::HashSet::new();
+        for _ in 0..20 {
+            let targets = initial_datagram_targets(
+                None,
+                candidates.iter(),
+                |_| false,
+                &mut cursor,
+            );
+            assert!(targets.len() <= MAX_INITIAL_TARGETS);
+            for target in targets {
+                observed.insert(target);
+            }
+        }
+        assert_eq!(observed.len(), candidates.len());
     }
 
     #[tokio::test]
