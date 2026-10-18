@@ -283,6 +283,11 @@ impl RelaySender {
         true
     }
 
+    /// Releases a queued or granted but unused permit for an abandoned relay datagram.
+    pub(super) fn abort_send(&mut self) {
+        self.sender.abort_send();
+    }
+
     pub(super) fn poll_send(
         &mut self,
         cx: &mut Context,
