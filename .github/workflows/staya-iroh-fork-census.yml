@@ -5,6 +5,7 @@ on:
       - lab/staya-iroh-fork-census-20261019
     paths:
       - .github/workflows/staya-iroh-fork-census.yml
+      - tools/staya/iroh_fork_census.py
   workflow_dispatch:
 permissions:
   contents: write
