@@ -1765,6 +1765,19 @@ impl Actor {
 
     fn re_stun(&mut self, why: UpdateReason) {
         let state = self.local_interfaces_watcher.get();
+
+        // Without relay servers, there is no net-report callback to publish
+        // new local addresses after the network changes (iroh #4588).
+        // Refresh directly instead of waiting for the periodic re-STUN tick.
+        #[cfg(not(wasm_browser))]
+        {
+            if self.sock.relay_map.is_empty() {
+                self.update_direct_addresses(None);
+                self.periodic_re_stun_timer = new_re_stun_timer(true);
+                return;
+            }
+        }
+
         self.direct_addr_update_state
             .schedule_run(why, state.into());
     }
