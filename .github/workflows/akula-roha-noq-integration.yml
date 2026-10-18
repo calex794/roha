@@ -39,7 +39,7 @@ jobs:
           grep -A6 '^name = "noq-udp"' Cargo.lock
       - name: Verify fork source and version in Cargo.lock
         run: |
-          python3 -c 'import tomllib; p=tomllib.load(open("Cargo.lock","rb"))["package"]; target="2eabf9895d40c263aa3369afd66efcf4a5d95056"; assert all(len([x for x in p if x["name"]==n and x["version"]=="1.4.0" and target in x.get("source","") and "github.com/calex794/noq" in x.get("source","")])==1 for n in ("noq","noq-proto","noq-udp"))'
+          python3 -c 'import tomllib; p=tomllib.load(open("Cargo.lock","rb"))["package"]; target="3230ea302af86e6381a0971e24328cbde9d8d9e6"; assert all(len([x for x in p if x["name"]==n and x["version"]=="1.4.0" and target in x.get("source","") and "github.com/calex794/noq" in x.get("source","")])==1 for n in ("noq","noq-proto","noq-udp"))'
       - name: Check user namespaces
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
