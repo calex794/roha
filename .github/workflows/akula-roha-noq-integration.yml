@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - "integration/roha-noq-forks-*"
+      - "integration/roha-noq-bbr852-*"
   workflow_dispatch:
 permissions:
   contents: read
