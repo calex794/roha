@@ -1,0 +1,49 @@
+name: Staya latest noq upgrade verification
+on:
+  push:
+    branches:
+      - lab/staya-noq-1-4-upgrade-20261019
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: staya-noq-1-4-upgrade
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: true
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: "1.91.0"
+      - name: Resolve and pin our current noq fork
+        run: |
+          set -euo pipefail
+          cargo +1.91.0 update -p noq --precise 1.4.0
+          cargo +1.91.0 metadata --locked --format-version 1 --no-deps > /tmp/staya-metadata.json
+          python3 - <<'PY'
+          import tomllib
+          with open("Cargo.lock", "rb") as f:
+              packages = tomllib.load(f)["package"]
+          for name in ("noq", "noq-proto", "noq-udp"):
+              matching = [p for p in packages if p["name"] == name]
+              assert len(matching) == 1, (name, matching)
+              p = matching[0]
+              assert p["version"] == "1.4.0", (name, p["version"])
+              assert p.get("source", "").startswith("git+https://github.com/calex794/noq.git"), (name, p.get("source"))
+              print(name, p["version"], p["source"])
+          PY
+      - name: Compile and execute withdrawal regression
+        run: cargo +1.91.0 test --locked -p iroh --features unstable-custom-transports,test-utils --lib test_staya_withdrawn_custom_only_connection_exits_within_deadline -- --nocapture
+        env:
+          RUST_BACKTRACE: "1"
+      - name: Persist resolved lockfile even on red test
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02b
+        with:
+          name: staya-noq-1-4-lockfile
+          path: Cargo.lock
