@@ -827,4 +827,79 @@ mod tests {
         router.shutdown().await.anyerr()?;
         Ok(())
     }
+
+    /// STAYA regression: when relay is established before a custom address is
+    /// withdrawn, the same QUIC connection and bidirectional stream must survive.
+    /// This ensures we do not close a working connection just because its primary
+    /// transport stopped advertising the local address.
+    #[tokio::test]
+    #[traced_test]
+    async fn test_staya_withdrawn_custom_falls_back_to_established_relay() -> Result<()> {
+        let (relay_map, _relay_url, _relay_guard) = run_relay_server().await?;
+        let network = TestNetwork::new();
+        let s1 = SecretKey::generate();
+        let s2 = SecretKey::generate();
+        let ep1_id = s1.public();
+
+        let t1 = network.create_transport(ep1_id)?;
+        let t2 = network.create_transport(s2.public())?;
+        let config = EndpointConfig::default().with_relay(relay_map);
+        let ep1 = endpoint_builder(s1, t1.clone(), config.clone()).bind().await?;
+        let ep2 = endpoint_builder(s2.clone(), t2, config).bind().await?;
+        ep1.online().await;
+        ep2.online().await;
+        let router = Router::builder(ep2.clone()).accept(ECHO_ALPN, Echo).spawn();
+
+        let conn = ep1.connect(mixed_addr(&ep2, s2.public()), ECHO_ALPN).await?;
+        let (mut send, mut recv) = conn.open_bi().await.anyerr()?;
+        send.write_all(b"before").await.anyerr()?;
+        let mut before = [0u8; 6];
+        tokio::time::timeout(Duration::from_secs(5), recv.read_exact(&mut before))
+            .await
+            .expect("STAYA_CUSTOM_ECHO_TIMED_OUT")
+            .anyerr()?;
+        assert_eq!(&before, b"before");
+
+        // The backup has to be established, not merely advertised or dialing.
+        tokio::time::timeout(Duration::from_secs(12), async {
+            loop {
+                let relay_ready = conn.paths().iter().any(|p| p.is_relay());
+                if relay_ready && is_custom_selected(&conn) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("STAYA_RELAY_BACKUP_NOT_ESTABLISHED");
+
+        network.block_endpoint(ep1_id);
+        t1.withdraw_local_addrs();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if is_relay_selected(&conn) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("STAYA_RELAY_NOT_SELECTED_AFTER_WITHDRAWAL");
+
+        send.write_all(b"after").await.anyerr()?;
+        send.finish().anyerr()?;
+        let mut after = [0u8; 5];
+        tokio::time::timeout(Duration::from_secs(5), recv.read_exact(&mut after))
+            .await
+            .expect("STAYA_RELAY_ECHO_TIMED_OUT")
+            .anyerr()?;
+        assert_eq!(&after, b"after", "data must not be lost during failover");
+        assert!(conn.close_reason().is_none(), "connection closed during relay failover");
+
+        conn.close(0u32.into(), b"done");
+        router.shutdown().await.anyerr()?;
+        ep1.close().await;
+        Ok(())
+    }
 }
