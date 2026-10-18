@@ -802,47 +802,29 @@ impl State {
         // though we might not have a relay transport or ip-capable transport set up.
         // So these errors must not be fatal for this actor (or even this operation).
 
-        let targets = if let Some(addr) = self.selected_path.as_ref() {
-            trace!(?addr, "sending datagram to selected path");
-
-            // TODO(Frando): We might want to include a local IP here in the future, if we confidently
-            // know that it is the correct one.
-            // See https://github.com/n0-computer/iroh/issues/4280.
-            smallvec![transports::FourTuple::from_remote(addr.remote())]
-        } else {
-            trace!(
-                paths = ?self.paths.addrs().collect::<Vec<_>>(),
-                "sending datagram to all known paths",
-            );
-            if self.paths.is_empty() {
-                warn!("Cannot send datagrams: No paths to remote endpoint known");
+        // Handshake datagrams belong to a new connection. A selected path
+        // may still belong to an old, silently-dead connection (#4600).
+        // Prefer it first, but also send the Initial to new known paths.
+        let mut targets = SmallVec::new();
+        if let Some(selected) = self.selected_path.as_ref() {
+            targets.push(transports::FourTuple::from_remote(selected.remote()));
+        }
+        for addr in self.paths.addrs() {
+            // Never direct a handshake packet back to our own address.
+            if let transports::Addr::Ip(sockaddr) = addr
+                && self
+                    .local_direct_addrs
+                    .peek()
+                    .iter()
+                    .any(|a| a.addr == *sockaddr)
+            {
+                continue;
             }
-
-            let mut targets = SmallVec::new();
-            for addr in self.paths.addrs() {
-                // We never want to send to our local addresses.
-                // The local address set is updated in the main loop so we can use `peek` here.
-                if let transports::Addr::Ip(sockaddr) = addr
-                    && self
-                        .local_direct_addrs
-                        .peek()
-                        .iter()
-                        .any(|a| a.addr == *sockaddr)
-                {
-                    trace!(%sockaddr, "not sending datagram to our own address");
-
-                // TODO(Frando): We might want to include a local IP here in the future, if we confidently
-                // know that it is the correct one.
-                // See https://github.com/n0-computer/iroh/issues/4280.
-                } else {
-                    targets.push(transports::FourTuple::from_remote(addr.clone()));
-                }
+            let candidate = transports::FourTuple::from_remote(addr.clone());
+            if !targets.contains(&candidate) {
+                targets.push(candidate);
             }
-            // This message is received *before* a connection is added.  So we do
-            // not yet have a connection to holepunch.  Instead we trigger
-            // holepunching when AddConnection is received.
-            targets
-        };
+        }
 
         if targets.is_empty() {
             return;
@@ -875,16 +857,15 @@ impl State {
         let addrs = to_transports_addr(self.endpoint_id, addrs);
         self.paths.insert_multiple(addrs, Source::App);
         self.paths.resolve_remote(tx);
-        // Start Address Lookup if we have no selected path.
+        // Resolve new addresses even if a previous connection selected a path.
         self.trigger_address_lookup();
     }
 
     /// Triggers Address Lookup for the remote endpoint, if needed.
     ///
-    /// Does not start Address Lookup if we have a selected path or if Address Lookup is
-    /// currently running.
+    /// Does not restart Address Lookup when one is already running.
     fn trigger_address_lookup(&mut self) {
-        if self.selected_path.is_some() || self.address_lookup_stream.is_some() {
+        if self.address_lookup_stream.is_some() {
             return;
         }
         let stream = self.address_lookup.resolve(self.endpoint_id);
