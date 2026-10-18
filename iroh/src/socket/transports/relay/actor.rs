@@ -1540,8 +1540,12 @@ mod tests {
 
         const COUNT: u16 = 2048;
         const FRAME_BYTES: usize = 1024;
-        let r1: RelayUrl = "https://healthy-reference-one.example.invalid".parse().unwrap();
-        let r2: RelayUrl = "https://healthy-reference-two.example.invalid".parse().unwrap();
+        let r1: RelayUrl = "https://healthy-reference-one.example.invalid"
+            .parse()
+            .unwrap();
+        let r2: RelayUrl = "https://healthy-reference-two.example.invalid"
+            .parse()
+            .unwrap();
         let peer = SecretKey::from_bytes(&[117u8; 32]).public();
         let frame = |url: &RelayUrl, marker: u8| RelaySendItem {
             remote_endpoint: peer,
