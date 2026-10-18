@@ -1,0 +1,34 @@
+name: Staya hosted patchbay relay validation
+on:
+  push:
+    branches:
+      - "lab/staya-hosted-patchbay-20261018"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  patchbay-relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: "1.91.0"
+      - name: Probe namespace capability
+        run: |
+          set -eu
+          uname -a
+          cat /proc/sys/kernel/unprivileged_userns_clone || true
+          unshare -Ur true
+      - name: Compile relay Patchbay without self-hosted runner
+        run: cargo test --locked -p iroh --test patchbay relay_connect_ipv4 --no-run
+      - name: Real process virtual network relay scenarios
+        env:
+          RUST_TEST_THREADS: "1"
+        run: |
+          set -eu
+          cargo test --locked -p iroh --test patchbay relay_connect_ipv4 -- --nocapture
+          cargo test --locked -p iroh --test patchbay relay_reconnect_relay_restart -- --nocapture
