@@ -1483,4 +1483,148 @@ mod tests {
             Poll::Ready(Ok(()))
         }
     }
+    /// Regression for a relay datagram-channel permit stranded by a dropped pending send.
+    ///
+    /// The noq [`Sender`] turns `Poll::Pending` from a relay send into `Ready(Ok(()))`
+    /// ("transport pending, dropped transmit"), so noq never polls that transmit again.
+    /// The relay sender's reservation is still queued on the channel's semaphore. When the
+    /// channel drains, the freed permit is granted to that abandoned reservation, and it is
+    /// held for as long as the connection's sender lives: a connection that has moved to a
+    /// direct path never sends via the relay again. Enough connections doing that leave
+    /// the channel with no permits, and every relay send on the endpoint stalls.
+    ///
+    /// Field measurement: one node had all 256 permits of the channel held by 256 idle
+    /// connection-driver tasks, each with a granted, never-polled reservation, with 417
+    /// senders queued behind them and the channel empty.
+    #[tokio::test]
+    async fn dropped_pending_relay_send_does_not_strand_a_channel_permit() {
+        use std::{
+            net::{Ipv4Addr, SocketAddr},
+            task::{Context, Poll, Waker},
+        };
+
+        use futures_util::StreamExt;
+        use iroh_base::{RelayUrl, SecretKey};
+
+        use crate::socket::mapped_addrs::MappedAddr;
+
+        // GIVEN: a real socket (for the relay address mapping) and a production noq Sender
+        // whose relay transport has a datagram channel of capacity one.
+        let ep = crate::Endpoint::builder(crate::endpoint::presets::Minimal)
+            .relay_mode(crate::RelayMode::Disabled)
+            .clear_ip_transports()
+            .bind_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .expect("loopback bind addr")
+            .bind()
+            .await
+            .expect("bind endpoint");
+        let sock = ep.inner().expect("endpoint inner").sock.clone();
+        let url: RelayUrl = "https://relay.example.invalid".parse().unwrap();
+        let remote = SecretKey::from_bytes(&[7u8; 32]).public();
+        let relay_dst = sock
+            .mapped_addrs
+            .relay_addrs
+            .get(&(url.clone(), remote))
+            .private_socket_addr();
+        let path = FourTuple::Relay {
+            url,
+            endpoint_id: remote,
+        };
+        let (transports_sender, mut drained) =
+            TransportsSender::with_bounded_relay(1, std::iter::empty());
+        let mut probe = transports_sender.clone();
+        let mut sender = Box::pin(Sender {
+            sock,
+            sender: transports_sender,
+        });
+        let mut cx = Context::from_waker(Waker::noop());
+        let transmit = Transmit {
+            ecn: None,
+            contents: b"datagram",
+            segment_size: None,
+        };
+
+        // AND: the channel is full.
+        assert!(
+            matches!(
+                Pin::new(&mut probe).poll_send(&mut cx, &path, &transmit),
+                Poll::Ready(Ok(()))
+            ),
+            "the first relay send takes the only permit"
+        );
+
+        // WHEN: noq sends via the relay while the channel is full. The send pends, and the
+        // Sender reports it to noq as sent (dropped).
+        let noq_transmit = noq_udp::Transmit {
+            destination: relay_dst,
+            ecn: None,
+            contents: b"dropped",
+            segment_size: None,
+            src_ip: None,
+        };
+        assert!(
+            matches!(
+                noq::UdpSender::poll_send(sender.as_mut(), &noq_transmit, &mut cx),
+                Poll::Ready(Ok(()))
+            ),
+            "a pending relay send is reported to noq as a dropped transmit"
+        );
+
+        // AND: the relay actor drains the channel.
+        tokio::time::timeout(std::time::Duration::from_secs(5), drained.next())
+            .await
+            .expect("the queued datagram is received")
+            .expect("channel open");
+
+        // THEN: the freed permit is available to the next relay send. A permit granted to
+        // the dropped transmit's abandoned reservation would leave this pending forever.
+        let mut probe = probe.clone();
+        assert!(
+            matches!(
+                Pin::new(&mut probe).poll_send(&mut cx, &path, &transmit),
+                Poll::Ready(Ok(()))
+            ),
+            "the relay channel permit was stranded by the dropped pending send"
+        );
+    }
+
+    /// Negative control for the test above: the same channel, fill, drain and probe, without
+    /// the dropped pending send. The permit must come back on any version, so a red above is
+    /// the dropped send and not the rig.
+    #[tokio::test]
+    async fn negative_control_without_a_dropped_send_the_relay_permit_returns() {
+        use std::task::{Context, Poll, Waker};
+
+        use futures_util::StreamExt;
+        use iroh_base::{RelayUrl, SecretKey};
+
+        let url: RelayUrl = "https://relay.example.invalid".parse().unwrap();
+        let path = FourTuple::Relay {
+            url,
+            endpoint_id: SecretKey::from_bytes(&[7u8; 32]).public(),
+        };
+        let (mut probe, mut drained) = TransportsSender::with_bounded_relay(1, std::iter::empty());
+        let mut cx = Context::from_waker(Waker::noop());
+        let transmit = Transmit {
+            ecn: None,
+            contents: b"datagram",
+            segment_size: None,
+        };
+        assert!(matches!(
+            Pin::new(&mut probe).poll_send(&mut cx, &path, &transmit),
+            Poll::Ready(Ok(()))
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(5), drained.next())
+            .await
+            .expect("the queued datagram is received")
+            .expect("channel open");
+        let mut probe = probe.clone();
+        assert!(
+            matches!(
+                Pin::new(&mut probe).poll_send(&mut cx, &path, &transmit),
+                Poll::Ready(Ok(()))
+            ),
+            "without a dropped send the drained permit is available again"
+        );
+    }
 }
