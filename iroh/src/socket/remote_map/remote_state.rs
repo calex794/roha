@@ -1441,7 +1441,7 @@ impl<'a> PathSelectionContext<'a> {
                 connections
                     .values()
                     .filter_map(|state| state.handle.upgrade().map(|conn| (state, conn)))
-                    .flat_map(|(state, conn)| {
+                    .flat_map(move |(state, conn)| {
                         state.paths.iter().filter(move |(_, addr)| !is_withdrawn_custom(addr, live)).map(move |(path_id, addr)| {
                             PathSelectionData::live(addr, *path_id, conn.clone())
                         })
