@@ -52,6 +52,13 @@ impl TestTransport {
     fn withdraw_local_addrs(&self) {
         self.id_watchable.set(Vec::new()).expect("test transport address watcher open");
     }
+
+    /// Re-advertise a local address after the test transport recovers.
+    fn restore_local_addrs(&self) {
+        self.id_watchable
+            .set(vec![to_custom_addr(self.id)])
+            .expect("test transport address watcher open");
+    }
 }
 
 impl Preset for Arc<TestTransport> {
@@ -135,6 +142,11 @@ impl TestNetwork {
     /// underlying path rather than destruction of the QUIC endpoint.
     fn block_endpoint(&self, id: EndpointId) {
         self.inner.lock().expect("poisoned").blocked.insert(id);
+    }
+
+    /// Restore packet delivery after a simulated link outage.
+    fn unblock_endpoint(&self, id: EndpointId) {
+        self.inner.lock().expect("poisoned").blocked.remove(&id);
     }
 }
 
@@ -897,6 +909,77 @@ mod tests {
         assert_eq!(&after, b"after", "data must not be lost during failover");
         assert!(conn.close_reason().is_none(), "connection closed during relay failover");
 
+        conn.close(0u32.into(), b"done");
+        router.shutdown().await.anyerr()?;
+        ep1.close().await;
+        Ok(())
+    }
+
+    /// STAYA regression: after custom -> relay failover the original QUIC
+    /// connection must be able to restore and prefer its recovered custom path.
+    /// A test transport address watcher announces loss and subsequent recovery.
+    #[tokio::test]
+    #[traced_test]
+    async fn test_staya_recovered_custom_reselected_without_reconnect() -> Result<()> {
+        let (relay_map, _relay_url, _relay_guard) = run_relay_server().await?;
+        let network = TestNetwork::new();
+        let s1 = SecretKey::generate();
+        let s2 = SecretKey::generate();
+        let ep1_id = s1.public();
+
+        let t1 = network.create_transport(ep1_id)?;
+        let t2 = network.create_transport(s2.public())?;
+        let config = EndpointConfig::default().with_relay(relay_map);
+        let ep1 = endpoint_builder(s1, t1.clone(), config.clone()).bind().await?;
+        let ep2 = endpoint_builder(s2.clone(), t2, config).bind().await?;
+        ep1.online().await;
+        ep2.online().await;
+        let router = Router::builder(ep2.clone()).accept(ECHO_ALPN, Echo).spawn();
+
+        let conn = ep1.connect(mixed_addr(&ep2, s2.public()), ECHO_ALPN).await?;
+        verify_echo(&conn, b"original custom path").await?;
+
+        tokio::time::timeout(Duration::from_secs(12), async {
+            loop {
+                if is_custom_selected(&conn) && conn.paths().iter().any(|p| p.is_relay()) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("STAYA_RECOVERY_BACKUP_NOT_READY");
+
+        network.block_endpoint(ep1_id);
+        t1.withdraw_local_addrs();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if is_relay_selected(&conn) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("STAYA_RECOVERY_RELAY_NOT_SELECTED");
+        verify_echo(&conn, b"survived on relay").await?;
+
+        network.unblock_endpoint(ep1_id);
+        t1.restore_local_addrs();
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if is_custom_selected(&conn) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("STAYA_RECOVERED_CUSTOM_NOT_RESELECTED");
+
+        verify_echo(&conn, b"custom path recovered").await?;
+        assert!(conn.close_reason().is_none(), "recovery must not reconnect");
         conn.close(0u32.into(), b"done");
         router.shutdown().await.anyerr()?;
         ep1.close().await;
