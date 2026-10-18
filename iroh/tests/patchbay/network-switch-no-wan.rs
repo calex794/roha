@@ -102,6 +102,66 @@ async fn lan_switch_advertises_new_addr_without_relay() -> Result {
     Ok(())
 }
 
+
+/// Regression stress: a single endpoint changes LAN six times with relays disabled.
+///
+/// In addition to the A->B->C test, verify repeated publication and removal of
+/// the previous direct address while reusing routers. A fresh endpoint is not
+/// created between switches, so stale cached network state remains observable.
+#[tokio::test]
+#[traced_test]
+async fn lan_repeated_switch_without_relay() -> Result {
+    let (lab, _guard) = Lab::for_test(testdir!()).await?;
+    let lan_a = lab.add_router("stress-lan-a").preset(RouterPreset::Home).build().await?.id();
+    let lan_b = lab.add_router("stress-lan-b").preset(RouterPreset::Home).build().await?.id();
+    let lan_c = lab.add_router("stress-lan-c").preset(RouterPreset::Home).build().await?.id();
+    let device = lab.add_device("stress-device").uplink(lan_a).build().await?;
+
+    let task = device.spawn(move |dev| async move {
+        let ep = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await?;
+
+        let result = async {
+            let mut previous = IpAddr::V4(dev.ip().expect("device has IPv4 on lan-a"));
+            wait_addr(&ep, |addr| addr.ip_addrs().any(|a| a.ip() == previous))
+                .await
+                .context("initial LAN advertisement")?;
+
+            // Alternate B and C, including a return to a previously used LAN.
+            for (hop, lan) in [lan_b, lan_c, lan_b, lan_c, lan_b, lan_c]
+                .into_iter()
+                .enumerate()
+            {
+                dev.iface("eth0")
+                    .expect("eth0")
+                    .replug(lan)
+                    .await
+                    .context("switch stress LAN")?;
+                let next = IpAddr::V4(dev.ip().expect("device IPv4 after LAN switch"));
+                info!(hop, ?previous, ?next, "stress switch");
+                wait_addr(&ep, |addr| {
+                    addr.ip_addrs().any(|a| a.ip() == next)
+                        && !addr.ip_addrs().any(|a| a.ip() == previous)
+                })
+                .await
+                .context("advertisement after repeated LAN switch")?;
+                previous = next;
+            }
+            Ok::<(), n0_error::AnyError>(())
+        }
+        .await;
+
+        ep.close().await;
+        result
+    })?;
+
+    task.await
+        .map_err(|err| anyerr!("stress device task panicked: {err}"))??;
+    Ok(())
+}
+
 async fn wait_addr(ep: &Endpoint, matches: impl Fn(&EndpointAddr) -> bool) -> Result {
     // Stay below the periodic refresh interval so it cannot mask a missed link change.
     tokio::time::timeout(Duration::from_secs(8), async {
