@@ -47,6 +47,8 @@ mod degrade;
 mod nat;
 #[path = "patchbay/relay.rs"]
 mod relay;
+#[path = "patchbay/network-switch-no-wan.rs"]
+mod network_switch_no_wan;
 #[path = "patchbay/switch-uplink.rs"]
 mod switch_uplink;
 #[path = "patchbay/util.rs"]
