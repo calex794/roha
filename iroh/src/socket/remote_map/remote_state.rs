@@ -1148,26 +1148,22 @@ fn initial_datagram_targets<'a>(
 ) -> SmallVec<[transports::FourTuple; 8]> {
     let mut targets = SmallVec::new();
     let mut remaining = Vec::new();
-    let mut push = |remote: transports::Addr| {
-        if let transports::Addr::Ip(ip) = &remote
-            && is_local_ip(ip)
-        {
-            return;
-        }
-        let path = transports::FourTuple::from_remote(remote);
-        if !targets.contains(&path) && !remaining.contains(&path) {
-            remaining.push(path);
-        }
-    };
-
     if let Some(selected) = selected {
-        push(selected.remote());
-        if !remaining.is_empty() {
-            targets.push(remaining.remove(0));
+        let remote = selected.remote();
+        if !matches!(&remote, transports::Addr::Ip(ip) if is_local_ip(ip)) {
+            targets.push(transports::FourTuple::from_remote(remote));
         }
     }
     for candidate in candidates {
-        push(candidate.clone());
+        if let transports::Addr::Ip(ip) = candidate
+            && is_local_ip(ip)
+        {
+            continue;
+        }
+        let path = transports::FourTuple::from_remote(candidate.clone());
+        if !targets.contains(&path) && !remaining.contains(&path) {
+            remaining.push(path);
+        }
     }
     if remaining.is_empty() {
         *cursor = 0;
