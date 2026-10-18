@@ -1,0 +1,45 @@
+name: Staya Iroh upstream history filter
+on:
+  push:
+    branches:
+      - lab/staya-iroh-fork-census-20261019
+    paths:
+      - .github/workflows/staya-iroh-history-filter.yml
+      - tools/staya/iroh_upstream_history_filter.py
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: staya-iroh-history-filter
+  cancel-in-progress: false
+jobs:
+  filter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: true
+      - name: Check input SHA census
+        run: test -s docs/staya/iroh-fork-census/2026-10-18/all_branch_heads.csv
+      - name: Check complete upstream history for each candidate
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: python3 tools/staya/iroh_upstream_history_filter.py
+      - name: Persist results
+        run: |
+          set -eu
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/staya/iroh-fork-census/2026-10-18
+          if ! git diff --cached --quiet; then
+            git commit -m "data(staya): classify Iroh fork SHAs by upstream history"
+            git push origin HEAD:lab/staya-iroh-fork-census-20261019
+          fi
+      - name: Save results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02b
+        with:
+          name: staya-iroh-history-filter
+          path: docs/staya/iroh-fork-census/2026-10-18
+          if-no-files-found: warn
