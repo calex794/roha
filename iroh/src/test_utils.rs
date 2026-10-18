@@ -13,9 +13,9 @@ use tokio::sync::oneshot;
 
 pub use self::{dns_and_pkarr_servers::DnsPkarrServer, qlog::QlogFileGroup};
 
-mod qlog;
 #[cfg(test)]
 mod akula_4600;
+mod qlog;
 #[cfg(feature = "unstable-custom-transports")]
 pub mod test_transport;
 
