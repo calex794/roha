@@ -36,5 +36,5 @@ jobs:
           set -eu
           for run in 1 2 3; do
             echo "=== STAYA_COMPARE run=${run} ==="
-            STAYA_BUILD_KIND="${GITHUB_REF_NAME}" cargo test --locked -p iroh --lib relay_two_healthy_capacity_reference -- --nocapture --exact 2>/dev/null || STAYA_BUILD_KIND="${GITHUB_REF_NAME}" cargo test --locked -p iroh --lib relay_two_healthy_capacity_reference -- --nocapture
+            STAYA_BUILD_KIND="${GITHUB_REF_NAME}" cargo test --locked -p iroh --lib relay_two_healthy_capacity_reference -- --nocapture
           done
