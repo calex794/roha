@@ -6,6 +6,7 @@ on:
     paths:
       - '**/Cargo.toml'
       - 'iroh/src/test_utils/test_transport.rs'
+      - 'iroh/src/socket/**'
       - '.github/workflows/staya-noq-current-verification.yml'
   workflow_dispatch:
 permissions:
