@@ -1250,16 +1250,20 @@ impl RelayActor {
             self.config
                 .my_relay
                 .set(relay_url.clone(), RelayConnectionState::Connecting);
-            self.set_home_relay(relay_url).await;
+            self.set_home_relay(Some(relay_url)).await;
         } else {
+            info!("no home relay, was {:?}", prev_url);
             self.config.my_relay.clear();
+            // Demote all existing active relay actors, including the former
+            // home, so their normal inactivity timer may close the socket.
+            self.set_home_relay(None).await;
         }
     }
 
-    async fn set_home_relay(&mut self, home_url: RelayUrl) {
-        let home_url_ref = &home_url;
+    async fn set_home_relay(&mut self, home_url: Option<RelayUrl>) {
+        let home_url_ref = home_url.as_ref();
         n0_future::join_all(self.active_relays.iter().map(|(url, handle)| async move {
-            let is_preferred = url == home_url_ref;
+            let is_preferred = Some(url) == home_url_ref;
             handle
                 .inbox_addr
                 .send(ActiveRelayMessage::SetHomeRelay(is_preferred))
@@ -1267,8 +1271,10 @@ impl RelayActor {
                 .ok()
         }))
         .await;
-        // Ensure we have an ActiveRelayActor for the current home relay.
-        self.active_relay_handle(home_url);
+        // Only ensure an ActiveRelayActor exists if there is a new home.
+        if let Some(home_url) = home_url {
+            self.active_relay_handle(home_url);
+        }
     }
 
     /// Returns the handle for the [`ActiveRelayActor`] to reach `remote_endpoint`.
