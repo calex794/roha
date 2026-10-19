@@ -340,18 +340,33 @@ http {{
 
     let base_url = format!("https://127.0.0.1:{proxy_port}");
     let ping_url = format!("{base_url}/prefix/ping");
-    let status_for = |target: &str| -> Result<String> {
-        let output = Command::new("curl")
-            .args(["--insecure", "--silent", "--output", "/dev/null", "--max-time", "2"])
-            .args(["--write-out", "%{http_code}"])
-            .arg(target)
-            .output()?;
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    // Command::output blocks its calling thread.  This integration test
+    // serves the relay on the Tokio executor, so running curl directly here
+    // starves that server of runtime turns on the default current-thread
+    // Tokio test runtime.  Keep the process call on Tokio's blocking pool.
+    let status_for = |target: String| async move {
+        tokio::task::spawn_blocking(move || -> Result<String> {
+            let output = Command::new("curl")
+                .args(["--insecure", "--silent", "--show-error", "--output", "/dev/null", "--max-time", "2"])
+                .args(["--write-out", "%{http_code}"])
+                .arg(&target)
+                .output()?;
+            if !output.status.success() {
+                eprintln!(
+                    "curl to {target} returned {:?}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        })
+        .await
+        .expect("curl blocking worker exited unexpectedly")
     };
 
     let mut ready = false;
     for _ in 0..40 {
-        if status_for(&ping_url)? == "200" {
+        if status_for(ping_url.clone()).await? == "200" {
             ready = true;
             break;
         }
@@ -359,7 +374,7 @@ http {{
     }
     assert!(ready, "HTTPS /prefix/ping never became reachable through nginx");
     assert_eq!(
-        status_for(&format!("{base_url}/ping"))?,
+        status_for(format!("{base_url}/ping")).await?,
         "404",
         "unprefixed probe must not be served by the reverse proxy"
     );
