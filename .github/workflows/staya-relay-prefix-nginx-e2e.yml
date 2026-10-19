@@ -6,6 +6,7 @@ on:
       - lab/staya-relay-tls-churn-20261019
       - lab/staya-relay-forwarding-e2e-20261019
       - lab/staya-relay-reconnect-e2e-20261019
+      - lab/staya-relay-strict-tls-20261019
   workflow_dispatch:
 permissions:
   contents: read
@@ -55,4 +56,10 @@ jobs:
         env:
           STAYA_DATAGRAM_E2E: "1"
           STAYA_RECONNECT_E2E: "1"
+        run: timeout 180s cargo +1.91.0 test --locked -p iroh-relay --features server,test-utils --test relay_axum relay_prefix_nginx_https_end_to_end -- --ignored --nocapture
+
+      - name: Validate nginx TLS certificate against local CA and reject untrusted roots
+        env:
+          STAYA_STRICT_TLS: "1"
+          STAYA_DATAGRAM_E2E: "1"
         run: timeout 180s cargo +1.91.0 test --locked -p iroh-relay --features server,test-utils --test relay_axum relay_prefix_nginx_https_end_to_end -- --ignored --nocapture
