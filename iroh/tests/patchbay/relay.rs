@@ -21,7 +21,9 @@ use testdir::testdir;
 use tokio::sync::oneshot;
 use tracing::info;
 
-use super::util::{self, Pair, PathConnectionExt, is_relayed, lab_with_relay, ping_accept, ping_open};
+use super::util::{
+    self, Pair, PathConnectionExt, is_relayed, lab_with_relay, ping_accept, ping_open,
+};
 
 /// Firewall rules that block all outbound UDP except DNS, leaving TCP open.
 ///
@@ -355,35 +357,35 @@ async fn relay_reconnect_relay_restart() -> Result {
 /// except for DNS, while its TCP relay access remains available.
 async fn run_direct_relay_direct(replug_side: Side) -> Result {
     let (lab, relay_map, _relay_guard, guard) = lab_with_relay(testdir!()).await?;
-    let initial = lab
-        .add_router("initial")
-        .nat(Nat::Moderate)
-        .build()
-        .await?;
+    let initial = lab.add_router("initial").nat(Nat::Moderate).build().await?;
     let blocked = lab
         .add_router("blocked")
         .nat(Nat::Moderate)
         .firewall_custom(block_udp_except_dns)
         .build()
         .await?;
-    let peer_net = lab.add_router("peer_net").nat(Nat::Moderate).build().await?;
+    let peer_net = lab
+        .add_router("peer_net")
+        .nat(Nat::Moderate)
+        .build()
+        .await?;
     let replug = lab
         .add_device("replug")
         .uplink(initial.id())
         .build()
         .await?;
-    let peer = lab
-        .add_device("peer")
-        .uplink(peer_net.id())
-        .build()
-        .await?;
+    let peer = lab.add_device("peer").uplink(peer_net.id()).build().await?;
 
     let setup = Duration::from_secs(20);
     let recovery = Duration::from_secs(45);
     Pair::new(relay_map)
         .left(replug_side, replug, async move |dev, _ep, conn| {
-            conn.wait_ip(setup).await.context("STY direct: first direct path")?;
-            ping_accept(&conn, setup).await.context("STY direct: first ping")?;
+            conn.wait_ip(setup)
+                .await
+                .context("STY direct: first direct path")?;
+            ping_accept(&conn, setup)
+                .await
+                .context("STY direct: first ping")?;
 
             info!("STY_PATH_DIRECT_TO_RELAY: replugging into UDP-blocked access");
             dev.iface("eth0").unwrap().replug(blocked.id()).await?;
@@ -412,8 +414,12 @@ async fn run_direct_relay_direct(replug_side: Side) -> Result {
             Ok(())
         })
         .right(peer, async move |_dev, _ep, conn| {
-            conn.wait_ip(setup).await.context("STY direct: peer initial path")?;
-            ping_open(&conn, setup).await.context("STY direct: first ping")?;
+            conn.wait_ip(setup)
+                .await
+                .context("STY direct: peer initial path")?;
+            ping_open(&conn, setup)
+                .await
+                .context("STY direct: first ping")?;
             ping_open(&conn, recovery)
                 .await
                 .context("STY relay: fallback ping")?;
