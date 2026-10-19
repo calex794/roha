@@ -1,0 +1,38 @@
+name: STAYA home relay removal PR 4616 regression
+on:
+  push:
+    branches:
+      - lab/staya-home-relay-4616-repro-20261019
+      - lab/staya-home-relay-4616-fix-20261019
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  relay-removal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: '1.91.0'
+      - name: Verify current own noq fork 1.4.0
+        run: |
+          set -euo pipefail
+          cargo +1.91.0 fetch --locked
+          python3 - <<'PY'
+          import tomllib
+          with open('Cargo.lock', 'rb') as f:
+              pkgs = tomllib.load(f)['package']
+          for name in ('noq', 'noq-proto', 'noq-udp'):
+              p = [p for p in pkgs if p['name'] == name]
+              assert len(p) == 1 and p[0]['version'] == '1.4.0', (name, p)
+              assert p[0].get('source', '').startswith('git+https://github.com/calex794/noq.git'), (name, p)
+              print(name, p[0]['source'])
+          PY
+      - name: Run reproduction of removed home relay
+        run: cargo +1.91.0 test --locked -p iroh --features unstable-custom-transports,test-utils --lib endpoint_releases_removed_home_relay -- --nocapture
+      - name: Check idle actor timeout
+        run: cargo +1.91.0 test --locked -p iroh --features unstable-custom-transports,test-utils --lib test_active_relay_inactive -- --nocapture
+      - name: Check relay replacement and traffic
+        run: cargo +1.91.0 test --locked -p iroh --features unstable-custom-transports,test-utils --lib endpoint_relay_map_change -- --nocapture
