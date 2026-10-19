@@ -435,7 +435,7 @@ http {{
             ClientBuilder::new(relay_url.clone(), key, DnsResolver::new())
                 .tls_client_config(tls_config.clone())
         };
-        let mut a = tokio::time::timeout(Duration::from_secs(10), connect(key_a).connect())
+        let mut a = tokio::time::timeout(Duration::from_secs(10), connect(key_a.clone()).connect())
             .await
             .std_context("relay client A connect timed out")??;
         let mut b = tokio::time::timeout(Duration::from_secs(10), connect(key_b).connect())
@@ -479,9 +479,56 @@ http {{
             assert_eq!(from_b, id_b, "wrong sender for B-to-A datagram");
             assert_eq!(received_a, sent_b, "payload changed B-to-A");
         }
+        // Verify recovery with the same authenticated endpoint ID after an
+        // abrupt client-side close.  Client B must remain connected throughout.
+        if std::env::var("STAYA_RECONNECT_E2E").ok().as_deref() == Some("1") {
+            drop(a);
+            tokio::time::sleep(Duration::from_millis(250)).await;
+
+            let mut recovered_a = tokio::time::timeout(
+                Duration::from_secs(10),
+                connect(key_a).connect(),
+            ).await.std_context("A failed to reconnect with the same key")??;
+
+            let replay = Datagrams::from(b"STAYA/recovered-A-to-B");
+            recovered_a.send(ClientToRelayMsg::Datagrams {
+                dst_endpoint_id: id_b,
+                datagrams: replay.clone(),
+            }).await?;
+            let got_b = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let msg = b.next().await.expect("B disconnected while A recovered")?;
+                    if let RelayToClientMsg::Datagrams { remote_endpoint_id, datagrams } = msg {
+                        return Ok::<_, n0_error::AnyError>((remote_endpoint_id, datagrams));
+                    }
+                }
+            }).await.std_context("B did not receive recovered A message")??;
+            assert_eq!(got_b.0, id_a, "sender ID changed after reconnect");
+            assert_eq!(got_b.1, replay, "reconnected A payload changed");
+
+            let reply = Datagrams::from(b"STAYA/B-to-recovered-A");
+            b.send(ClientToRelayMsg::Datagrams {
+                dst_endpoint_id: id_a,
+                datagrams: reply.clone(),
+            }).await?;
+            let got_a = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let msg = recovered_a.next().await.expect("recovered A disconnected")?;
+                    if let RelayToClientMsg::Datagrams { remote_endpoint_id, datagrams } = msg {
+                        return Ok::<_, n0_error::AnyError>((remote_endpoint_id, datagrams));
+                    }
+                }
+            }).await.std_context("recovered A did not receive B message")??;
+            assert_eq!(got_a.0, id_b);
+            assert_eq!(got_a.1, reply);
+            recovered_a.close().await?;
+            b.close().await?;
+            eprintln!("STAYA relay reconnect: original identity retained; B remains online; two payloads confirmed");
+        } else {
+            a.close().await?;
+            b.close().await?;
+        }
         assert_eq!(status_for(ping_url.clone()).await?, "200");
-        a.close().await?;
-        b.close().await?;
         eprintln!("STAYA relay data path: 8/8 directional datagrams delivered through nginx TLS");
     }
     Ok(())

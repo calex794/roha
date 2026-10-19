@@ -5,6 +5,7 @@ on:
       - lab/staya-relay-prefix-nginx-e2e-20261019
       - lab/staya-relay-tls-churn-20261019
       - lab/staya-relay-forwarding-e2e-20261019
+      - lab/staya-relay-reconnect-e2e-20261019
   workflow_dispatch:
 permissions:
   contents: read
@@ -48,4 +49,10 @@ jobs:
       - name: Bidirectional relay datagrams through real nginx TLS
         env:
           STAYA_DATAGRAM_E2E: "1"
+        run: timeout 180s cargo +1.91.0 test --locked -p iroh-relay --features server,test-utils --test relay_axum relay_prefix_nginx_https_end_to_end -- --ignored --nocapture
+
+      - name: Confirm bidirectional traffic after A abruptly disconnects and reconnects
+        env:
+          STAYA_DATAGRAM_E2E: "1"
+          STAYA_RECONNECT_E2E: "1"
         run: timeout 180s cargo +1.91.0 test --locked -p iroh-relay --features server,test-utils --test relay_axum relay_prefix_nginx_https_end_to_end -- --ignored --nocapture
