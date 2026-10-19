@@ -384,17 +384,39 @@ http {{
     let relay_url: RelayUrl = format!("{base_url}/prefix/").parse()?;
     let tls_config = CaTlsConfig::insecure_skip_verify().client_config(default_provider())?;
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
-    let _conn = tokio::time::timeout(
-        Duration::from_secs(10),
-        ClientBuilder::new(
-            relay_url,
-            SecretKey::from_bytes(&rng.random()),
-            DnsResolver::new(),
+    // CI can increase the number of real TLS/WebSocket handshakes on the
+    // same nginx/backend process. No requests go to an external service.
+    let rounds: usize = std::env::var("STAYA_STRESS_ROUNDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    assert!((1..=64).contains(&rounds), "bounded to 64 local handshakes");
+    let mut succeeded = 0usize;
+    for i in 0..rounds {
+        let conn = tokio::time::timeout(
+            Duration::from_secs(10),
+            ClientBuilder::new(
+                relay_url.clone(),
+                SecretKey::from_bytes(&rng.random()),
+                DnsResolver::new(),
+            )
+            .tls_client_config(tls_config.clone())
+            .connect(),
         )
-        .tls_client_config(tls_config)
-        .connect(),
-    )
-    .await
-    .std_context("timeout connecting to relay over nginx HTTPS")??;
+        .await
+        .std_context("timeout connecting to relay over nginx HTTPS")??;
+        succeeded += 1;
+        // Exercise client disconnect and reconnection on one running relay.
+        drop(conn);
+        if (i + 1) % 8 == 0 {
+            assert_eq!(
+                status_for(ping_url.clone()).await?,
+                "200",
+                "relay probe failed during connection churn"
+            );
+        }
+    }
+    assert_eq!(succeeded, rounds);
+    eprintln!("STAYA relay local HTTPS nginx connections: {succeeded}/{rounds}");
     Ok(())
 }

@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - lab/staya-relay-prefix-nginx-e2e-20261019
+      - lab/staya-relay-tls-churn-20261019
   workflow_dispatch:
 permissions:
   contents: read
@@ -37,3 +38,8 @@ jobs:
         run: cargo +1.91.0 test --locked -p iroh-relay --features server,test-utils --test relay_axum relay_prefix_nginx_https_end_to_end -- --ignored --nocapture
       - name: Verify relay prefix remains backward-compatible
         run: cargo +1.91.0 test --locked -p iroh-relay --lib relay_route_keeps_path_prefix -- --nocapture
+
+      - name: Bounded churn of 32 live nginx TLS WebSocket connections
+        env:
+          STAYA_STRESS_ROUNDS: "32"
+        run: timeout 180s cargo +1.91.0 test --locked -p iroh-relay --features server,test-utils --test relay_axum relay_prefix_nginx_https_end_to_end -- --ignored --nocapture
