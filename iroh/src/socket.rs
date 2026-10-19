@@ -69,7 +69,8 @@ use crate::{
     address_lookup::{self, AddressLookupFailed, EndpointData, UserData},
     defaults::timeouts::NET_REPORT_TIMEOUT,
     endpoint::{
-        LocalTransportAddr, RelayStatus, hooks::EndpointHooksList, quic::QuicTransportConfig,
+        LocalTransportAddr, RelayStatus, ServerIncomingLimits, hooks::EndpointHooksList,
+        quic::QuicTransportConfig,
     },
     metrics::EndpointMetrics,
     net_report::{self, IfStateDetails, Report},
@@ -242,6 +243,7 @@ pub(crate) struct StaticConfig {
     #[debug("Arc<dyn TokenStore>")]
     pub(crate) token_store: Arc<dyn TokenStore>,
     pub(crate) transport_config: QuicTransportConfig,
+    pub(crate) server_incoming_limits: Option<ServerIncomingLimits>,
 }
 
 impl StaticConfig {
@@ -255,6 +257,13 @@ impl StaticConfig {
         let mut inner =
             noq::ServerConfig::new(Arc::new(quic_server_config), self.token_key.clone());
         inner.transport_config(self.transport_config.to_inner_arc());
+        // Reapply on EVERY server config construction, including changes
+        // to ALPN after bind. Never silently reset to upstream defaults.
+        if let Some(limits) = self.server_incoming_limits {
+            inner.max_incoming(limits.max_incoming());
+            inner.incoming_buffer_size(limits.per_incoming_bytes());
+            inner.incoming_buffer_size_total(limits.total_incoming_bytes());
+        }
         inner
     }
 
@@ -2173,6 +2182,7 @@ mod tests {
             token_key: Arc::new(RustlsTokenKey::new(rng, &crypto_provider).unwrap()),
             token_store: Arc::new(noq::TokenMemoryCache::default()),
             transport_config: QuicTransportConfig::default(),
+            server_incoming_limits: None,
         };
         let server_config = static_config.create_server_config(vec![]);
         Options {
@@ -2588,6 +2598,7 @@ mod tests {
             token_key: Arc::new(RustlsTokenKey::new(&mut rand::rng(), &crypto_provider).unwrap()),
             token_store: Arc::new(noq::TokenMemoryCache::default()),
             transport_config: QuicTransportConfig::default(),
+            server_incoming_limits: None,
         };
         let server_config = static_config.create_server_config(vec![ALPN.to_vec()]);
 
