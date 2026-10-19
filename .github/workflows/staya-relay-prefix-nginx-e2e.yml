@@ -4,6 +4,7 @@ on:
     branches:
       - lab/staya-relay-prefix-nginx-e2e-20261019
       - lab/staya-relay-tls-churn-20261019
+      - lab/staya-relay-tls-parallel-20261019
   workflow_dispatch:
 permissions:
   contents: read
@@ -42,4 +43,9 @@ jobs:
       - name: Bounded churn of 32 live nginx TLS WebSocket connections
         env:
           STAYA_STRESS_ROUNDS: "32"
+        run: timeout 180s cargo +1.91.0 test --locked -p iroh-relay --features server,test-utils --test relay_axum relay_prefix_nginx_https_end_to_end -- --ignored --nocapture
+
+      - name: Sixteen simultaneous authenticated relay clients held for eight seconds
+        env:
+          STAYA_PARALLEL_CLIENTS: "16"
         run: timeout 180s cargo +1.91.0 test --locked -p iroh-relay --features server,test-utils --test relay_axum relay_prefix_nginx_https_end_to_end -- --ignored --nocapture
