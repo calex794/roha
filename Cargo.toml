@@ -63,6 +63,6 @@ type_method_marked_deprecated = { required-update = "minor" }
 # Kept in integration/* only until Cargo.lock and cross-crate tests pass.
 # All three crates must share the same noq Git revision.
 [patch.crates-io]
-noq = { git = "https://github.com/calex794/noq", rev = "2eabf9895d40c263aa3369afd66efcf4a5d95056" }
-noq-proto = { git = "https://github.com/calex794/noq", rev = "2eabf9895d40c263aa3369afd66efcf4a5d95056" }
-noq-udp = { git = "https://github.com/calex794/noq", rev = "2eabf9895d40c263aa3369afd66efcf4a5d95056" }
+noq = { git = "https://github.com/calex794/noq", rev = "13b93f70aec5cd0155fff794204fc256523db799" }
+noq-proto = { git = "https://github.com/calex794/noq", rev = "13b93f70aec5cd0155fff794204fc256523db799" }
+noq-udp = { git = "https://github.com/calex794/noq", rev = "13b93f70aec5cd0155fff794204fc256523db799" }
