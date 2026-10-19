@@ -21,7 +21,7 @@ use testdir::testdir;
 use tokio::sync::oneshot;
 use tracing::info;
 
-use super::util::{self, Pair, is_relayed, lab_with_relay, ping_accept, ping_open};
+use super::util::{self, Pair, PathConnectionExt, is_relayed, lab_with_relay, ping_accept, ping_open};
 
 /// Firewall rules that block all outbound UDP except DNS, leaving TCP open.
 ///
@@ -345,4 +345,107 @@ async fn relay_reconnect_relay_restart() -> Result {
         .await?;
     guard.ok();
     Ok(())
+}
+
+/// STY-RN-5: change an established direct path into a relay-only path without
+/// closing the QUIC connection, then restore a direct path on the same session.
+///
+/// This is a *transport-only* regression: it does not move user files or grant
+/// any FsStore/File Gate authority. The access router becomes unable to use UDP
+/// except for DNS, while its TCP relay access remains available.
+async fn run_direct_relay_direct(replug_side: Side) -> Result {
+    let (lab, relay_map, _relay_guard, guard) = lab_with_relay(testdir!()).await?;
+    let initial = lab
+        .add_router("initial")
+        .nat(Nat::Moderate)
+        .build()
+        .await?;
+    let blocked = lab
+        .add_router("blocked")
+        .nat(Nat::Moderate)
+        .firewall_custom(block_udp_except_dns)
+        .build()
+        .await?;
+    let peer_net = lab.add_router("peer_net").nat(Nat::Moderate).build().await?;
+    let replug = lab
+        .add_device("replug")
+        .uplink(initial.id())
+        .build()
+        .await?;
+    let peer = lab
+        .add_device("peer")
+        .uplink(peer_net.id())
+        .build()
+        .await?;
+
+    let setup = Duration::from_secs(20);
+    let recovery = Duration::from_secs(45);
+    Pair::new(relay_map)
+        .left(replug_side, replug, async move |dev, _ep, conn| {
+            conn.wait_ip(setup).await.context("STY direct: first direct path")?;
+            ping_accept(&conn, setup).await.context("STY direct: first ping")?;
+
+            info!("STY_PATH_DIRECT_TO_RELAY: replugging into UDP-blocked access");
+            dev.iface("eth0").unwrap().replug(blocked.id()).await?;
+            // Drive the same connection while UDP to the peer is unavailable.
+            ping_accept(&conn, recovery)
+                .await
+                .context("STY relay: ping over fallback")?;
+            conn.wait_selected(recovery, |p| p.is_relay())
+                .await
+                .context("STY relay: relay path must be selected")?;
+            info!("STY_PATH_RELAY_SELECTED");
+            // Keep the blocked link active until the peer has observed it too.
+            ping_accept(&conn, recovery)
+                .await
+                .context("STY relay: observation barrier")?;
+
+            dev.iface("eth0").unwrap().replug(initial.id()).await?;
+            conn.wait_ip(recovery)
+                .await
+                .context("STY direct: path must recover after replug")?;
+            info!("STY_PATH_DIRECT_RECOVERED");
+            ping_accept(&conn, recovery)
+                .await
+                .context("STY direct: final ping")?;
+            conn.closed().await;
+            Ok(())
+        })
+        .right(peer, async move |_dev, _ep, conn| {
+            conn.wait_ip(setup).await.context("STY direct: peer initial path")?;
+            ping_open(&conn, setup).await.context("STY direct: first ping")?;
+            ping_open(&conn, recovery)
+                .await
+                .context("STY relay: fallback ping")?;
+            conn.wait_selected(recovery, |p| p.is_relay())
+                .await
+                .context("STY relay: peer must select relay")?;
+            ping_open(&conn, recovery)
+                .await
+                .context("STY relay: observation barrier")?;
+            conn.wait_ip(recovery)
+                .await
+                .context("STY direct: peer must recover")?;
+            ping_open(&conn, recovery)
+                .await
+                .context("STY direct: final ping")?;
+            conn.close(0u32.into(), b"bye");
+            Ok(())
+        })
+        .run()
+        .await?;
+    guard.ok();
+    Ok(())
+}
+
+#[tokio::test]
+#[traced_test]
+async fn direct_relay_direct_client_replug() -> Result {
+    run_direct_relay_direct(Side::Client).await
+}
+
+#[tokio::test]
+#[traced_test]
+async fn direct_relay_direct_server_replug() -> Result {
+    run_direct_relay_direct(Side::Server).await
 }
