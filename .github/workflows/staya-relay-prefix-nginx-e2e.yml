@@ -34,6 +34,6 @@ jobs:
               assert matching[0].get('source', '').startswith('git+https://github.com/calex794/noq.git'), (name, matching)
           PY
       - name: Run real nginx TLS prefix relay handshake and probe
-        run: cargo +1.91.0 test --locked -p iroh-relay --features server --test relay_axum relay_prefix_nginx_https_end_to_end -- --ignored --nocapture
+        run: cargo +1.91.0 test --locked -p iroh-relay --features server,test-utils --test relay_axum relay_prefix_nginx_https_end_to_end -- --ignored --nocapture
       - name: Verify relay prefix remains backward-compatible
         run: cargo +1.91.0 test --locked -p iroh-relay --lib relay_route_keeps_path_prefix -- --nocapture
