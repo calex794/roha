@@ -127,17 +127,26 @@ impl ServerIncomingLimits {
         if total_incoming_bytes < per_incoming_bytes {
             return Err(ServerIncomingLimitsError::TotalBelowPerIncoming);
         }
-        Ok(Self { max_incoming, per_incoming_bytes, total_incoming_bytes })
+        Ok(Self {
+            max_incoming,
+            per_incoming_bytes,
+            total_incoming_bytes,
+        })
     }
 
     /// Maximum number of pending, unaccepted transport Incoming objects.
-    pub fn max_incoming(self) -> usize { self.max_incoming }
+    pub fn max_incoming(self) -> usize {
+        self.max_incoming
+    }
     /// Maximum buffered packet bytes for each pending Incoming.
-    pub fn per_incoming_bytes(self) -> u64 { self.per_incoming_bytes }
+    pub fn per_incoming_bytes(self) -> u64 {
+        self.per_incoming_bytes
+    }
     /// Maximum total buffered packet bytes for all pending Incoming.
-    pub fn total_incoming_bytes(self) -> u64 { self.total_incoming_bytes }
+    pub fn total_incoming_bytes(self) -> u64 {
+        self.total_incoming_bytes
+    }
 }
-
 
 #[cfg(not(wasm_browser))]
 pub use bind::{BindOpts, InvalidSocketAddr, ToSocketAddr};
@@ -4311,11 +4320,7 @@ mod server_incoming_limits_tests {
 
     #[test]
     fn server_incoming_limits_reject_zeros_and_inconsistent_budgets() {
-        for (n, per, total) in [
-            (0, 4096, 8192),
-            (16, 0, 8192),
-            (16, 4096, 0),
-        ] {
+        for (n, per, total) in [(0, 4096, 8192), (16, 0, 8192), (16, 4096, 0)] {
             assert_eq!(
                 ServerIncomingLimits::new(n, per, total),
                 Err(ServerIncomingLimitsError::Zero)
