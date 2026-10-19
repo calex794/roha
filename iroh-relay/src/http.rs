@@ -14,6 +14,17 @@ pub const RELAY_PATH: &str = "/relay";
 /// The HTTP path under which the relay allows doing latency queries for testing.
 pub const RELAY_PROBE_PATH: &str = "/ping";
 
+/// Constructs a relay HTTP route without discarding the URL path prefix.
+///
+/// For example, `https://example.com/prefix/` and `/relay` yield
+/// `https://example.com/prefix/relay`; the root URL still yields `/relay`.
+pub fn relay_route(relay_url: &url::Url, path: &str) -> url::Url {
+    let mut url = relay_url.clone();
+    let prefix = relay_url.path().trim_end_matches('/');
+    url.set_path(&format!("{prefix}{path}"));
+    url
+}
+
 /// The HTTP header name for relay client authentication
 pub const CLIENT_AUTH_HEADER: HeaderName = HeaderName::from_static("x-iroh-relay-client-auth-v1");
 
@@ -116,6 +127,16 @@ mod tests {
     use strum::EnumCount;
 
     use super::*;
+
+    #[test]
+    fn relay_route_keeps_path_prefix() {
+        let route = |url: &str, path| relay_route(&url.parse().unwrap(), path).to_string();
+        assert_eq!(route("https://example.com", RELAY_PATH), "https://example.com/relay");
+        assert_eq!(route("https://example.com/", RELAY_PROBE_PATH), "https://example.com/ping");
+        assert_eq!(route("https://example.com/prefix/", RELAY_PATH), "https://example.com/prefix/relay");
+        assert_eq!(route("https://example.com/prefix/", RELAY_PROBE_PATH), "https://example.com/prefix/ping");
+        assert_eq!(route("https://example.com/a/b", RELAY_PROBE_PATH), "https://example.com/a/b/ping");
+    }
 
     #[test]
     fn all_is_exhaustive() {

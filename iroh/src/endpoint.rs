@@ -2929,6 +2929,44 @@ mod tests {
         Ok(())
     }
 
+    /// Regression for upstream PR #4616: removing the only configured relay
+    /// must clear the endpoint's advertised and watched home relay.
+    #[tokio::test]
+    #[traced_test]
+    async fn endpoint_releases_removed_home_relay() -> Result {
+        let (relay_map, relay_url, _guard) = run_relay_server().await?;
+        let config = relay_map.get(&relay_url).expect("missing endpoint").clone();
+        let ep = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Custom(relay_map))
+            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
+            .bind()
+            .await?;
+        ep.online().await;
+        assert_eq!(ep.addr().relay_urls().next(), Some(&relay_url));
+
+        let wait_for = |want: Option<RelayUrl>| {
+            let watcher = ep.watch_addr();
+            tokio::time::timeout(Duration::from_secs(10), async move {
+                let mut stream = watcher.stream();
+                while let Some(addr) = stream.next().await {
+                    if addr.relay_urls().next() == want.as_ref() {
+                        return;
+                    }
+                }
+            })
+        };
+
+        assert!(ep.remove_relay(&relay_url).await.is_some());
+        wait_for(None).await.anyerr()?;
+        assert!(ep.home_relay_status().get().is_empty());
+
+        assert!(ep.insert_relay(relay_url.clone(), config).await.is_none());
+        wait_for(Some(relay_url)).await.anyerr()?;
+
+        ep.close().await;
+        Ok(())
+    }
+
     #[tokio::test]
     #[traced_test]
     async fn endpoint_bidi_send_recv() -> Result {
