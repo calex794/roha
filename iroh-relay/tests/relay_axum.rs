@@ -376,7 +376,7 @@ http {{
         .spawn()?;
     let _proxy_guard = NginxGuard {
         child,
-        dir: workdir,
+        dir: workdir.clone(),
     };
 
     let base_url = format!("https://127.0.0.1:{proxy_port}");
