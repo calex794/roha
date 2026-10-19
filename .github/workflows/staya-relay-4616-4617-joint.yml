@@ -1,0 +1,73 @@
+name: STAYA combined Roha relay PR 4616 and 4617 regressions
+on:
+  push:
+    branches:
+      - lab/staya-relay-4616-4617-joint-20261019
+  workflow_dispatch:
+permissions:
+  contents: read
+
+jobs:
+  combined-fixes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: "1.91.0"
+      - name: Confirm our noq 1.4.0 Git dependencies
+        run: |
+          set -euo pipefail
+          cargo +1.91.0 fetch --locked
+          python3 - <<'PY'
+          import tomllib
+          with open('Cargo.lock', 'rb') as f:
+              packages = tomllib.load(f)['package']
+          for name in ('noq', 'noq-proto', 'noq-udp'):
+              matches = [p for p in packages if p['name'] == name]
+              assert len(matches) == 1, (name, matches)
+              pkg = matches[0]
+              source = pkg.get('source', '')
+              assert pkg['version'] == '1.4.0', (name, pkg)
+              assert source.startswith('git+https://github.com/calex794/noq.git'), (name, source)
+              print(name, pkg['version'], source)
+          PY
+      - name: PR 4617 path prefix preservation
+        run: cargo +1.91.0 test --locked -p iroh-relay --lib relay_route_keeps_path_prefix -- --nocapture
+      - name: PR 4616 removal and re-insertion regression
+        run: cargo +1.91.0 test --locked -p iroh --features unstable-custom-transports,test-utils --lib endpoint_releases_removed_home_relay -- --nocapture
+      - name: PR 4616 actual socket release after demotion
+        run: cargo +1.91.0 test --locked -p iroh --features unstable-custom-transports,test-utils --lib test_staya_demoted_home_relay_connection_closes_after_idle -- --nocapture
+      - name: Non-home relay timeout remains correct
+        run: cargo +1.91.0 test --locked -p iroh --features unstable-custom-transports,test-utils --lib test_active_relay_inactive -- --nocapture
+      - name: Relay switch preserves message delivery
+        run: cargo +1.91.0 test --locked -p iroh --features unstable-custom-transports,test-utils --lib endpoint_relay_map_change -- --nocapture
+      - name: Production build of Iroh with both relay changes
+        run: cargo +1.91.0 check --locked -p iroh
+
+  relay-library:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: "1.91.0"
+      - name: Run all relay library unit tests
+        run: cargo +1.91.0 test --locked -p iroh-relay --lib -- --nocapture
+
+  network-paths:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: "1.91.0"
+      - name: Removing the last custom route does not hang
+        run: timeout 240s cargo +1.91.0 test --locked -p iroh --features unstable-custom-transports,test-utils --lib test_staya_withdrawn_custom_only_connection_exits_within_deadline -- --nocapture
+      - name: Custom to relay failover keeps the QUIC connection
+        run: timeout 120s cargo +1.91.0 test --locked -p iroh --features unstable-custom-transports,test-utils --lib test_staya_withdrawn_custom_falls_back_to_established_relay -- --nocapture
+      - name: Recovered custom route gets selected on the same connection
+        run: timeout 150s cargo +1.91.0 test --locked -p iroh --features unstable-custom-transports,test-utils --lib test_staya_recovered_custom_reselected_without_reconnect -- --nocapture
