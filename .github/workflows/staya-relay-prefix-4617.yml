@@ -1,0 +1,35 @@
+name: Staya relay path prefix verification
+on:
+  push:
+    branches:
+      - lab/staya-relay-prefix-4617-20261019
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  relay-prefix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: '1.91.0'
+      - name: Verify current own noq fork 1.4.0
+        run: |
+          set -euo pipefail
+          cargo +1.91.0 fetch --locked
+          python3 - <<'PY'
+          import tomllib
+          with open('Cargo.lock', 'rb') as f:
+              pkgs = tomllib.load(f)['package']
+          for name in ('noq', 'noq-proto', 'noq-udp'):
+              p = [p for p in pkgs if p['name'] == name]
+              assert len(p) == 1 and p[0]['version'] == '1.4.0', (name, p)
+              assert p[0].get('source', '').startswith('git+https://github.com/calex794/noq.git'), (name, p)
+              print(name, p[0]['source'])
+          PY
+      - name: Check URL path prefix regression test
+        run: cargo +1.91.0 test --locked -p iroh-relay --lib relay_route_keeps_path_prefix -- --nocapture
+      - name: Check Roha endpoint integration
+        run: cargo +1.91.0 check --locked -p iroh
