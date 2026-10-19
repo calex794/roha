@@ -34,5 +34,7 @@ jobs:
         run: cargo +1.91.0 test --locked -p iroh --features unstable-custom-transports,test-utils --lib endpoint_releases_removed_home_relay -- --nocapture
       - name: Check idle actor timeout
         run: cargo +1.91.0 test --locked -p iroh --features unstable-custom-transports,test-utils --lib test_active_relay_inactive -- --nocapture
+      - name: Verify demoted home relay actually closes
+        run: cargo +1.91.0 test --locked -p iroh --features unstable-custom-transports,test-utils --lib test_staya_demoted_home_relay_connection_closes_after_idle -- --nocapture
       - name: Check relay replacement and traffic
         run: cargo +1.91.0 test --locked -p iroh --features unstable-custom-transports,test-utils --lib endpoint_relay_map_change -- --nocapture

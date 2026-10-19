@@ -1816,6 +1816,92 @@ mod tests {
         Ok(())
     }
 
+    /// When a home relay is removed, its live socket must stop after the
+    /// normal inactivity timeout rather than staying alive indefinitely.
+    #[tokio::test]
+    #[traced_test]
+    async fn test_staya_demoted_home_relay_connection_closes_after_idle() -> Result {
+        let (relay_map, relay_url, _server) = test_utils::run_relay_server().await?;
+        let (recv_queue, _recv_rx) = mpsc::channel(8);
+        let metrics = Arc::new(SocketMetrics::default());
+        let config = Config {
+            my_relay: Default::default(),
+            secret_key: SecretKey::from_bytes(&[5u8; 32]),
+            dns_resolver: DnsResolver::new(),
+            proxy_url: None,
+            ipv6_reported: Arc::new(AtomicBool::new(false)),
+            tls_config: CaTlsConfig::insecure_skip_verify()
+                .client_config(default_provider())
+                .expect("infallible"),
+            metrics: metrics.clone(),
+            relay_map,
+        };
+        let mut actor = RelayActor::new(config, recv_queue, CancellationToken::new());
+
+        let mut report = crate::net_report::Report::default();
+        report.preferred_relay = Some(relay_url.clone());
+        actor.on_network_change(report).await;
+        assert!(actor.config.my_relay.get().is_some());
+
+        // A successful pong ensures the actor is connected and has processed
+        // the preceding SetHomeRelay(true) message.
+        let inbox = actor
+            .active_relays
+            .get(&relay_url)
+            .expect("home relay actor was not created")
+            .inbox_addr
+            .clone();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let (tx, rx) = oneshot::channel();
+                inbox
+                    .send(ActiveRelayMessage::PingServer(tx))
+                    .await
+                    .expect("relay actor stopped before connecting");
+                if let Ok(Ok(())) = tokio::time::timeout(Duration::from_millis(200), rx).await {
+                    break;
+                }
+            }
+        })
+        .await
+        .std_context("home relay did not connect")?;
+        assert!(metrics.relay_conns_success.get() >= 1);
+
+        // With no configured relay left, the home role must be revoked.
+        actor
+            .on_network_change(crate::net_report::Report::default())
+            .await;
+        assert!(actor.config.my_relay.get().is_none());
+        // A subsequent pong acts as a barrier: the actor must have processed
+        // SetHomeRelay(false) before we advance the inactivity clock.
+        let (tx, rx) = oneshot::channel();
+        inbox
+            .send(ActiveRelayMessage::PingServer(tx))
+            .await
+            .expect("relay actor stopped before demotion was acknowledged");
+        tokio::time::timeout(Duration::from_secs(2), rx)
+            .await
+            .std_context("no pong after demotion")?
+            .std_context("pong channel closed after demotion")?;
+
+        tokio::time::pause();
+        tokio::time::advance(RELAY_INACTIVE_CLEANUP_TIME + Duration::from_secs(1)).await;
+        tokio::time::resume();
+
+        let ended = tokio::time::timeout(Duration::from_secs(3), actor.active_relay_tasks.join_next())
+            .await
+            .std_context("demoted home relay task did not close after inactivity")?;
+        assert!(matches!(ended, Some(Ok(()))), "demoted actor task failed: {ended:?}");
+        actor.reap_active_relays();
+        assert!(!actor.active_relays.contains_key(&relay_url));
+        assert_eq!(
+            metrics.relay_conns_closed.get(),
+            metrics.relay_conns_success.get(),
+            "removing the home relay must close its live connection"
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     #[traced_test]
     async fn test_active_relay_inactive() -> Result {
