@@ -1,0 +1,46 @@
+name: STAYA Iroh part 05 full branch history
+on:
+  push:
+    branches:
+      - lab/staya-iroh-fork-census-20261019
+    paths:
+      - .github/workflows/staya-iroh-part05-history.yml
+permissions:
+  contents: write
+concurrency:
+  group: staya-iroh-part05-full-audit
+  cancel-in-progress: false
+jobs:
+  part05:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Confirm frozen input and script
+        run: |
+          python3 -m py_compile tools/staya/iroh_part_history_audit.py
+          python3 tools/staya/iroh_part_history_audit.py --part 5 --dry-run
+      - name: Compare every part-05 fork head with full reachable upstream history
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PYTHONUNBUFFERED: '1'
+        run: python3 tools/staya/iroh_part_history_audit.py --part 5 --workers 3
+      - name: Store part-05 evidence in research branch
+        run: |
+          set -eu
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/staya/iroh-fork-census/2026-10-18/part_review/part_05_*
+          if ! git diff --cached --quiet; then
+            git commit -m 'data(staya): part 05 history evidence for 104 forks'
+            git push origin HEAD:lab/staya-iroh-fork-census-20261019
+          fi
+      - name: Upload evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staya-iroh-part05-history
+          path: docs/staya/iroh-fork-census/2026-10-18/part_review/part_05_*
+          if-no-files-found: warn
