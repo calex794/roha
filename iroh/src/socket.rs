@@ -69,8 +69,8 @@ use crate::{
     address_lookup::{self, AddressLookupFailed, EndpointData, UserData},
     defaults::timeouts::NET_REPORT_TIMEOUT,
     endpoint::{
-        LocalTransportAddr, RelayStatus, ServerIncomingLimits,
-        hooks::EndpointHooksList, quic::QuicTransportConfig,
+        LocalTransportAddr, RelayStatus, ServerIncomingLimits, hooks::EndpointHooksList,
+        quic::QuicTransportConfig,
     },
     metrics::EndpointMetrics,
     net_report::{self, IfStateDetails, Report},
