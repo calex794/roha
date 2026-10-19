@@ -1,17 +1,21 @@
 use std::{
+    future::Future,
     io,
     net::{IpAddr, SocketAddr, SocketAddrV4, SocketAddrV6},
     num::NonZeroUsize,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
+    time::Duration,
 };
 
+use futures_util::task::AtomicWaker;
 use ipnet::{Ipv4Net, Ipv6Net};
 use n0_watcher::Watchable;
 use netwatch::{UdpSender, UdpSocket};
 use pin_project::pin_project;
-use tracing::{debug, info, trace};
+use tokio::time::{Instant, Sleep};
+use tracing::{debug, info, trace, warn};
 
 use super::{RecvInfo, Transmit};
 use crate::metrics::{EndpointMetrics, SocketMetrics};
@@ -22,6 +26,16 @@ pub(crate) struct IpTransport {
     socket: Arc<UdpSocket>,
     local_addr: Watchable<SocketAddr>,
     metrics: Arc<SocketMetrics>,
+    rebind_waker: Arc<AtomicWaker>,
+    rebind_retry: Option<RebindRetry>,
+}
+
+// Recovery is driven by receive polling, so dropping the transport also drops
+// the retry timer. Persistent failures back off rather than spin or kill Noq.
+#[derive(Debug)]
+struct RebindRetry {
+    delay: Duration,
+    sleep: Pin<Box<Sleep>>,
 }
 
 impl std::fmt::Display for IpTransport {
@@ -185,10 +199,12 @@ impl IpTransport {
             socket: Arc::new(socket),
             local_addr,
             metrics,
+            rebind_waker: Default::default(),
+            rebind_retry: None,
         })
     }
 
-    /// NOTE: Receiving on a closed socket will return [`Poll::Pending`] indefinitely.
+    /// Closed sockets wait for a backed-off rebind instead of terminating Noq.
     pub(super) fn poll_recv(
         &mut self,
         cx: &mut Context,
@@ -202,6 +218,26 @@ impl IpTransport {
             recv_infos.len(),
             "non matching bufs & recv_infos"
         );
+        self.rebind_waker.register(cx.waker());
+        if self.socket.is_closed() {
+            let retry = self.rebind_retry.get_or_insert_with(|| {
+                let delay = Duration::from_millis(100);
+                RebindRetry {
+                    delay,
+                    sleep: Box::pin(tokio::time::sleep(delay)),
+                }
+            });
+            std::task::ready!(retry.sleep.as_mut().poll(cx));
+            if let Err(err) = rebind_socket(&self.socket, &self.local_addr) {
+                warn!("failed to rebind IP transport: {err:?}");
+                retry.delay = (retry.delay * 2).min(Duration::from_secs(5));
+                retry.sleep.as_mut().reset(Instant::now() + retry.delay);
+                // Register the timer's wakeup before returning Pending.
+                let _ = retry.sleep.as_mut().poll(cx);
+                return Poll::Pending;
+            }
+        }
+        self.rebind_retry = None;
         match self.socket.poll_recv_noq(cx, bufs, metas) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Ok(n)) => {
@@ -225,6 +261,12 @@ impl IpTransport {
                     );
                 }
                 Poll::Ready(Ok(n))
+            }
+            Poll::Ready(Err(_)) if self.socket.is_closed() => {
+                // A network-change rebind may fail between the check above and
+                // the receive poll. Enter recovery on the next poll as well.
+                cx.waker().wake_by_ref();
+                Poll::Pending
             }
             Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
         }
@@ -254,6 +296,7 @@ impl IpTransport {
         IpNetworkChangeSender {
             socket: self.socket.clone(),
             local_addr: self.local_addr.clone(),
+            rebind_waker: self.rebind_waker.clone(),
         }
     }
 
@@ -271,22 +314,30 @@ impl IpTransport {
 pub(super) struct IpNetworkChangeSender {
     socket: Arc<UdpSocket>,
     local_addr: Watchable<SocketAddr>,
+    rebind_waker: Arc<AtomicWaker>,
 }
 
 impl IpNetworkChangeSender {
     pub(super) fn rebind(&self) -> io::Result<()> {
-        let old_addr = self.local_addr.get();
-        self.socket.rebind()?;
-        let addr = self.socket.local_addr()?;
-        self.local_addr.set(addr).ok();
-        trace!("rebound from {} to {}", old_addr, addr);
-
-        Ok(())
+        let result = rebind_socket(&self.socket, &self.local_addr);
+        // netwatch wakes its receivers only on success. A failed rebind must
+        // wake the Noq driver too, so it can arm the recovery timer.
+        self.rebind_waker.wake();
+        result
     }
 
     pub(super) fn on_network_change(&self, _info: &crate::socket::Report) {
         // Nothing to do for now
     }
+}
+
+fn rebind_socket(socket: &UdpSocket, local_addr: &Watchable<SocketAddr>) -> io::Result<()> {
+    let old_addr = local_addr.get();
+    socket.rebind()?;
+    let addr = socket.local_addr()?;
+    local_addr.set(addr).ok();
+    trace!("rebound from {} to {}", old_addr, addr);
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
