@@ -78,13 +78,21 @@ const DATAGRAM_SEND_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_DATAGRAM_SEND_TASKS: usize = 16;
 
 /// Keeps the current deduplication behavior explicit for regression testing.
+const MAX_PENDING_OPEN_PATHS: usize = 64;
+
+/// Deduplicate path retries and bound the number of distinct remote addresses.
+/// When saturated, keep the newest candidates; evicted peers can re-advertise.
 fn enqueue_pending_open_path(
     pending: &mut VecDeque<transports::FourTuple>,
     addr: &transports::FourTuple,
 ) {
-    if !pending.contains(addr) {
-        pending.push_back(addr.clone());
+    if pending.contains(addr) {
+        return;
     }
+    if pending.len() >= MAX_PENDING_OPEN_PATHS {
+        pending.pop_front();
+    }
+    pending.push_back(addr.clone());
 }
 
 
