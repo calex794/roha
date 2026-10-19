@@ -77,6 +77,17 @@ const ACTOR_MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const DATAGRAM_SEND_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_DATAGRAM_SEND_TASKS: usize = 16;
 
+/// Keeps the current deduplication behavior explicit for regression testing.
+fn enqueue_pending_open_path(
+    pending: &mut VecDeque<transports::FourTuple>,
+    addr: &transports::FourTuple,
+) {
+    if !pending.contains(addr) {
+        pending.push_back(addr.clone());
+    }
+}
+
+
 /// A stream of events from all paths for all connections.
 ///
 /// The connection is identified using [`ConnId`].  The event `Err` variant happens when the
@@ -1083,9 +1094,7 @@ impl State {
                         // The number of distinct candidate 4-tuples for a remote is
                         // small (single digits), so `contains` is a short linear scan
                         // and bounds the queue to that set.
-                        if !self.pending_open_paths.contains(open_4tuple) {
-                            self.pending_open_paths.push_back(open_4tuple.clone());
-                        }
+                        enqueue_pending_open_path(&mut self.pending_open_paths, open_4tuple);
                         trace!(?open_4tuple, ?ret, "scheduling open_path");
                     }
                     _ => warn!(?ret, "Opening path failed"),
@@ -1570,6 +1579,50 @@ async fn maybe_next<S: Stream + Unpin>(maybe_stream: Option<&mut S>) -> Option<O
 #[cfg(all(test, not(wasm_browser)))]
 mod tests {
     use super::*;
+
+    fn pending_path(port: u16) -> transports::FourTuple {
+        transports::FourTuple::from_remote(transports::Addr::Ip(
+            SocketAddr::from(([127, 0, 0, 1], port)),
+        ))
+    }
+
+    #[test]
+    fn pending_open_paths_dedup_existing_behavior() {
+        let mut queue = VecDeque::new();
+        let path = pending_path(4444);
+        for _ in 0..10_000 {
+            enqueue_pending_open_path(&mut queue, &path);
+        }
+        assert_eq!(queue.len(), 1);
+    }
+
+    #[test]
+    fn pending_open_paths_limit_under_distinct_address_churn() {
+        let mut queue = VecDeque::new();
+        for port in 1..=4096u16 {
+            enqueue_pending_open_path(&mut queue, &pending_path(port));
+        }
+        assert_eq!(queue.len(), 64, "queued distinct paths must be bounded");
+        assert!(!queue.contains(&pending_path(1)));
+        assert!(queue.contains(&pending_path(4096)));
+    }
+
+    #[test]
+    fn pending_open_paths_retry_fanout_deduplicates() {
+        let mut queue = VecDeque::new();
+        for port in 1..=64u16 {
+            enqueue_pending_open_path(&mut queue, &pending_path(port));
+        }
+        // One path-open tick can retry each address over many QUIC connections.
+        let snapshot = std::mem::take(&mut queue);
+        for path in snapshot {
+            for _ in 0..256 {
+                enqueue_pending_open_path(&mut queue, &path);
+            }
+        }
+        assert_eq!(queue.len(), 64);
+    }
+
 
     #[tokio::test]
     async fn blocked_relay_does_not_delay_direct_initial() {
