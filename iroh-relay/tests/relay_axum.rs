@@ -429,7 +429,7 @@ http {{
         use iroh_relay::protos::relay::{ClientToRelayMsg, RelayToClientMsg};
         use n0_future::{SinkExt, StreamExt};
         let (ready_tx, mut ready_rx) = tokio::sync::mpsc::channel(parallel);
-        let release = Arc::new(Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
         let mut tasks = Vec::with_capacity(parallel);
         for index in 0..parallel {
             let url = relay_url.clone();
@@ -456,12 +456,12 @@ http {{
                             }
                         }
                     }
-                    n0_error::bail!("relay stream ended before ping response")
+                    return Err(n0_error::AnyError::from("relay stream ended before ping response"));
                 })
                 .await
                 .std_context("parallel relay ping timed out")??;
                 let _ = pong;
-                tx.send(index).await?;
+                tx.send(index).await.expect("parallel result receiver disappeared");
                 release.notified().await;
                 // Verify each connection is still usable after the hold.
                 conn.send(ClientToRelayMsg::Ping(payload)).await?;
@@ -473,7 +473,7 @@ http {{
                             }
                         }
                     }
-                    n0_error::bail!("relay stream ended during hold")
+                    return Err(n0_error::AnyError::from("relay stream ended during hold"));
                 })
                 .await
                 .std_context("parallel relay second ping timed out")??;
