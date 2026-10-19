@@ -418,5 +418,71 @@ http {{
     }
     assert_eq!(succeeded, rounds);
     eprintln!("STAYA relay local HTTPS nginx connections: {succeeded}/{rounds}");
+
+    // A successful ping only confirms the relay control plane.
+    // Check actual payload delivery A -> B and B -> A across HTTPS nginx,
+    // including the authenticated sending endpoint and exact bytes.
+    if std::env::var("STAYA_DATAGRAM_E2E").ok().as_deref() == Some("1") {
+        use iroh_relay::protos::relay::{ClientToRelayMsg, Datagrams, RelayToClientMsg};
+        use n0_future::{SinkExt, StreamExt};
+
+        let key_a = SecretKey::from_bytes(&rng.random());
+        let key_b = SecretKey::from_bytes(&rng.random());
+        let id_a = key_a.public();
+        let id_b = key_b.public();
+
+        let connect = |key: SecretKey| {
+            ClientBuilder::new(relay_url.clone(), key, DnsResolver::new())
+                .tls_client_config(tls_config.clone())
+        };
+        let mut a = tokio::time::timeout(Duration::from_secs(10), connect(key_a).connect())
+            .await
+            .std_context("relay client A connect timed out")??;
+        let mut b = tokio::time::timeout(Duration::from_secs(10), connect(key_b).connect())
+            .await
+            .std_context("relay client B connect timed out")??;
+
+        for round in 0..4 {
+            let sent_a = Datagrams::from(
+                format!("STAYA/A-to-B/round-{round}/{}", "data".repeat(120)).as_bytes()
+            );
+            a.send(ClientToRelayMsg::Datagrams {
+                dst_endpoint_id: id_b,
+                datagrams: sent_a.clone(),
+            }).await?;
+            let (from_a, received_b) = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let frame = b.next().await.expect("client B stream ended").expect("client B receive failed");
+                    if let RelayToClientMsg::Datagrams { remote_endpoint_id, datagrams } = frame {
+                        break (remote_endpoint_id, datagrams);
+                    }
+                }
+            }).await.std_context("A-to-B datagram was not delivered")?;
+            assert_eq!(from_a, id_a, "wrong sender for A-to-B datagram");
+            assert_eq!(received_b, sent_a, "payload changed A-to-B");
+
+            let sent_b = Datagrams::from(
+                format!("STAYA/B-to-A/round-{round}/{}", "reply".repeat(90)).as_bytes()
+            );
+            b.send(ClientToRelayMsg::Datagrams {
+                dst_endpoint_id: id_a,
+                datagrams: sent_b.clone(),
+            }).await?;
+            let (from_b, received_a) = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let frame = a.next().await.expect("client A stream ended").expect("client A receive failed");
+                    if let RelayToClientMsg::Datagrams { remote_endpoint_id, datagrams } = frame {
+                        break (remote_endpoint_id, datagrams);
+                    }
+                }
+            }).await.std_context("B-to-A datagram was not delivered")?;
+            assert_eq!(from_b, id_b, "wrong sender for B-to-A datagram");
+            assert_eq!(received_a, sent_b, "payload changed B-to-A");
+        }
+        assert_eq!(status_for(ping_url.clone()).await?, "200");
+        a.close().await?;
+        b.close().await?;
+        eprintln!("STAYA relay data path: 8/8 directional datagrams delivered through nginx TLS");
+    }
     Ok(())
 }
