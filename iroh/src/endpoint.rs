@@ -89,6 +89,56 @@ pub(crate) mod hooks;
 pub mod presets;
 pub(crate) mod quic;
 
+/// QUIC server limits applied before the transport creates Incoming objects.
+///
+/// The default endpoint behavior remains unchanged if these are omitted.
+/// This caps outstanding unauthenticated Incoming objects and buffered
+/// subsequent packets, not CPU spent parsing the first UDP/QUIC packet
+/// (which is outside this buffer budget).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ServerIncomingLimits {
+    max_incoming: usize,
+    per_incoming_bytes: u64,
+    total_incoming_bytes: u64,
+}
+
+/// Invalid server-side pre-Incoming resource budgets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServerIncomingLimitsError {
+    /// At least one budget is zero.
+    Zero,
+    /// Aggregate packet buffer allowance is smaller than one connection.
+    TotalBelowPerIncoming,
+}
+
+impl ServerIncomingLimits {
+    /// Construct an explicit finite policy for a receiving endpoint.
+    ///
+    /// The first incoming QUIC packet is not counted by noq's buffered
+    /// packet limits. Applications need separate socket/UDP edge limits.
+    pub fn new(
+        max_incoming: usize,
+        per_incoming_bytes: u64,
+        total_incoming_bytes: u64,
+    ) -> Result<Self, ServerIncomingLimitsError> {
+        if max_incoming == 0 || per_incoming_bytes == 0 || total_incoming_bytes == 0 {
+            return Err(ServerIncomingLimitsError::Zero);
+        }
+        if total_incoming_bytes < per_incoming_bytes {
+            return Err(ServerIncomingLimitsError::TotalBelowPerIncoming);
+        }
+        Ok(Self { max_incoming, per_incoming_bytes, total_incoming_bytes })
+    }
+
+    /// Maximum number of pending, unaccepted transport Incoming objects.
+    pub fn max_incoming(self) -> usize { self.max_incoming }
+    /// Maximum buffered packet bytes for each pending Incoming.
+    pub fn per_incoming_bytes(self) -> u64 { self.per_incoming_bytes }
+    /// Maximum total buffered packet bytes for all pending Incoming.
+    pub fn total_incoming_bytes(self) -> u64 { self.total_incoming_bytes }
+}
+
+
 #[cfg(not(wasm_browser))]
 pub use bind::{BindOpts, InvalidSocketAddr, ToSocketAddr};
 pub use hooks::{AfterHandshakeOutcome, BeforeConnectOutcome, EndpointHooks};
@@ -132,6 +182,7 @@ pub struct Builder {
     secret_key: Option<SecretKey>,
     alpn_protocols: Vec<Vec<u8>>,
     transport_config: QuicTransportConfig,
+    server_incoming_limits: Option<ServerIncomingLimits>,
     keylog: bool,
     address_lookup: Vec<Box<dyn DynAddressLookupBuilder>>,
     address_lookup_user_data: Option<UserData>,
@@ -202,6 +253,7 @@ impl Builder {
             secret_key: Default::default(),
             alpn_protocols: Default::default(),
             transport_config: QuicTransportConfig::default(),
+            server_incoming_limits: None,
             keylog: Default::default(),
             address_lookup: Default::default(),
             address_lookup_user_data: Default::default(),
@@ -249,6 +301,7 @@ impl Builder {
             client_config: tls_config.make_client_config(self.keylog)?,
             tls_config,
             transport_config: self.transport_config.clone(),
+            server_incoming_limits: self.server_incoming_limits,
             token_key,
             token_store: Arc::new(noq::TokenMemoryCache::default()),
         };
@@ -677,6 +730,16 @@ impl Builder {
     /// and maintaining direct connections.
     pub fn transport_config(mut self, transport_config: QuicTransportConfig) -> Self {
         self.transport_config = transport_config;
+        self
+    }
+
+    /// Applies limits to the QUIC server *before* the transport accepts
+    /// untrusted Incoming packets. They persist across set_alpns() calls.
+    ///
+    /// This is not a UDP/IP packet-parser or kernel-memory admission cap:
+    /// it bounds pending Incoming counts and noq's subsequent packet buffers.
+    pub fn server_incoming_limits(mut self, limits: ServerIncomingLimits) -> Self {
+        self.server_incoming_limits = Some(limits);
         self
     }
 
@@ -4239,5 +4302,36 @@ mod tests {
             .std_context("waiting for endpoint to come online")?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod server_incoming_limits_tests {
+    use super::{ServerIncomingLimits, ServerIncomingLimitsError};
+
+    #[test]
+    fn server_incoming_limits_reject_zeros_and_inconsistent_budgets() {
+        for (n, per, total) in [
+            (0, 4096, 8192),
+            (16, 0, 8192),
+            (16, 4096, 0),
+        ] {
+            assert_eq!(
+                ServerIncomingLimits::new(n, per, total),
+                Err(ServerIncomingLimitsError::Zero)
+            );
+        }
+        assert_eq!(
+            ServerIncomingLimits::new(16, 8192, 4096),
+            Err(ServerIncomingLimitsError::TotalBelowPerIncoming)
+        );
+    }
+
+    #[test]
+    fn server_incoming_limits_preserve_exact_operator_configuration() {
+        let limits = ServerIncomingLimits::new(32, 4096, 65536).unwrap();
+        assert_eq!(limits.max_incoming(), 32);
+        assert_eq!(limits.per_incoming_bytes(), 4096);
+        assert_eq!(limits.total_incoming_bytes(), 65536);
     }
 }
