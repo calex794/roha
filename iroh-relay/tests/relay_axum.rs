@@ -279,6 +279,8 @@ async fn relay_prefix_nginx_https_end_to_end() -> Result<()> {
     std::fs::create_dir_all(&workdir)?;
     let cert = workdir.join("server.pem");
     let key = workdir.join("server.key");
+    let strict_tls = std::env::var("STAYA_STRICT_TLS").ok().as_deref() == Some("1");
+    let ca_der = workdir.join("local-ca.der");
     let openssl = Command::new("openssl")
         .args(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1"])
         .arg("-keyout")
@@ -292,6 +294,45 @@ async fn relay_prefix_nginx_https_end_to_end() -> Result<()> {
         "could not create a local TLS certificate: {}",
         String::from_utf8_lossy(&openssl.stderr)
     );
+
+    // Strict TLS mode uses a short-lived local CA to sign the nginx leaf cert.
+    // This tests the production verification path, not insecure_skip_verify.
+    if strict_tls {
+        let ca_pem = workdir.join("local-ca.pem");
+        let ca_key = workdir.join("local-ca.key");
+        let ca_output = Command::new("openssl")
+            .args(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1"])
+            .arg("-keyout").arg(&ca_key)
+            .arg("-out").arg(&ca_pem)
+            .args(["-subj", "/CN=STAYA-Local-Test-CA", "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign"])
+            .output()?;
+        assert!(ca_output.status.success(), "CA generation failed: {}", String::from_utf8_lossy(&ca_output.stderr));
+
+        let csr = workdir.join("server.csr");
+        let csr_output = Command::new("openssl")
+            .args(["req", "-new", "-key"]).arg(&key)
+            .arg("-out").arg(&csr).args(["-subj", "/CN=localhost"])
+            .output()?;
+        assert!(csr_output.status.success(), "server CSR failed: {}", String::from_utf8_lossy(&csr_output.stderr));
+
+        let ext = workdir.join("server-ext.cnf");
+        std::fs::write(&ext, "subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n")?;
+        let sign_output = Command::new("openssl")
+            .args(["x509", "-req", "-in"]).arg(&csr)
+            .arg("-CA").arg(&ca_pem)
+            .arg("-CAkey").arg(&ca_key)
+            .arg("-CAcreateserial")
+            .arg("-out").arg(&cert)
+            .args(["-days", "1", "-extfile"]).arg(&ext)
+            .output()?;
+        assert!(sign_output.status.success(), "server certificate signing failed: {}", String::from_utf8_lossy(&sign_output.stderr));
+
+        let ca_der_output = Command::new("openssl")
+            .args(["x509", "-in"]).arg(&ca_pem)
+            .args(["-outform", "DER", "-out"]).arg(&ca_der)
+            .output()?;
+        assert!(ca_der_output.status.success(), "CA DER export failed: {}", String::from_utf8_lossy(&ca_der_output.stderr));
+    }
 
     // nginx strips /prefix/ before forwarding to the unmodified relay backend.
     // WebSocket upgrades must survive the extra proxy hop.
@@ -344,13 +385,21 @@ http {{
     // serves the relay on the Tokio executor, so running curl directly here
     // starves that server of runtime turns on the default current-thread
     // Tokio test runtime.  Keep the process call on Tokio's blocking pool.
-    let status_for = |target: String| async move {
-        tokio::task::spawn_blocking(move || -> Result<String> {
-            let output = Command::new("curl")
-                .args(["--insecure", "--silent", "--show-error", "--output", "/dev/null", "--max-time", "2"])
-                .args(["--write-out", "%{http_code}"])
-                .arg(&target)
-                .output()?;
+    let ca_for_curl = strict_tls.then(|| workdir.join("local-ca.pem"));
+    let status_for = |target: String| {
+        let ca_for_curl = ca_for_curl.clone();
+        async move {
+            tokio::task::spawn_blocking(move || -> Result<String> {
+                let mut cmd = Command::new("curl");
+                cmd.args(["--silent", "--show-error", "--output", "/dev/null", "--max-time", "2"]);
+                if let Some(ca) = ca_for_curl {
+                    cmd.arg("--cacert").arg(ca);
+                } else {
+                    cmd.arg("--insecure");
+                }
+                let output = cmd.args(["--write-out", "%{http_code}"])
+                    .arg(&target)
+                    .output()?;
             if !output.status.success() {
                 eprintln!(
                     "curl to {target} returned {:?}: {}",
@@ -360,8 +409,9 @@ http {{
             }
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
         })
-        .await
-        .expect("curl blocking worker exited unexpectedly")
+            .await
+            .expect("curl blocking worker exited unexpectedly")
+        }
     };
 
     let mut ready = false;
@@ -382,8 +432,32 @@ http {{
     // The native client must retain /prefix/relay while changing HTTPS to WSS,
     // then successfully upgrade and authenticate against the real relay.
     let relay_url: RelayUrl = format!("{base_url}/prefix/").parse()?;
-    let tls_config = CaTlsConfig::insecure_skip_verify().client_config(default_provider())?;
+    let tls_config = if strict_tls {
+        let der = std::fs::read(&ca_der)?;
+        CaTlsConfig::custom_roots([webpki_types::CertificateDer::from(der)])
+            .client_config(default_provider())?
+    } else {
+        CaTlsConfig::insecure_skip_verify().client_config(default_provider())?
+    };
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+    if strict_tls {
+        // The trust chain check is meaningful only if the same connection is
+        // rejected without the test CA in its trust store.
+        let unrelated_roots = CaTlsConfig::embedded().client_config(default_provider())?;
+        let rejected = tokio::time::timeout(
+            Duration::from_secs(8),
+            ClientBuilder::new(
+                relay_url.clone(),
+                SecretKey::from_bytes(&rng.random()),
+                DnsResolver::new(),
+            )
+            .tls_client_config(unrelated_roots)
+            .connect(),
+        )
+        .await
+        .std_context("negative TLS verification timed out")?;
+        assert!(rejected.is_err(), "untrusted certificate unexpectedly accepted");
+    }
     // CI can increase the number of real TLS/WebSocket handshakes on the
     // same nginx/backend process. No requests go to an external service.
     let rounds: usize = std::env::var("STAYA_STRESS_ROUNDS")
