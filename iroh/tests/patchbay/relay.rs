@@ -12,8 +12,8 @@
 
 use std::time::Duration;
 
-use iroh::endpoint::Side;
-use n0_error::{Result, StackResultExt, StdResultExt, anyerr};
+use iroh::endpoint::{Connection, Side};
+use n0_error::{Result, StackResultExt, StdResultExt, anyerr, ensure_any};
 use n0_future::task::AbortOnDropHandle;
 use n0_tracing_test::traced_test;
 use patchbay::{FirewallConfigBuilder, IpSupport, Lab, Nat, OutDir};
@@ -349,6 +349,57 @@ async fn relay_reconnect_relay_restart() -> Result {
     Ok(())
 }
 
+/// A bounded deterministic network fixture, *not* a file in an Akula Vault.
+/// Sending and checking the payload on each selected path checks more than
+/// an eight-byte ping: the QUIC stream and its bytes survive route changes.
+const STY_PATH_FIXTURE_SIZE: usize = 256 * 1024;
+
+fn sty_path_fixture() -> Vec<u8> {
+    (0..STY_PATH_FIXTURE_SIZE)
+        .map(|offset| {
+            (offset as u8)
+                .wrapping_mul(37)
+                .wrapping_add((offset / 1024) as u8)
+        })
+        .collect()
+}
+
+async fn sty_fixture_open(conn: &Connection, timeout: Duration) -> Result {
+    tokio::time::timeout(timeout, async {
+        let source = sty_path_fixture();
+        let expected = blake3::hash(&source);
+        let (mut send, mut recv) = conn.open_bi().await.anyerr()?;
+        send.write_all(&source).await.anyerr()?;
+        send.finish().anyerr()?;
+        let receipt = recv.read_to_end(32).await.anyerr()?;
+        ensure_any!(
+            receipt.as_slice() == expected.as_bytes(),
+            "STY fixture: invalid BLAKE3 receipt"
+        );
+        Ok(())
+    })
+    .await
+    .with_std_context(|_| format!("STY fixture sender timed out after {timeout:?}"))?
+}
+
+async fn sty_fixture_accept(conn: &Connection, timeout: Duration) -> Result {
+    tokio::time::timeout(timeout, async {
+        let (mut send, mut recv) = conn.accept_bi().await.anyerr()?;
+        let received = recv.read_to_end(STY_PATH_FIXTURE_SIZE).await.anyerr()?;
+        ensure_any!(
+            received == sty_path_fixture(),
+            "STY fixture: bounded bytes do not match source"
+        );
+        send.write_all(blake3::hash(&received).as_bytes())
+            .await
+            .anyerr()?;
+        send.finish().anyerr()?;
+        Ok(())
+    })
+    .await
+    .with_std_context(|_| format!("STY fixture receiver timed out after {timeout:?}"))?
+}
+
 /// STY-RN-5: change an established direct path into a relay-only path without
 /// closing the QUIC connection, then restore a direct path on the same session.
 ///
@@ -401,6 +452,9 @@ async fn run_direct_relay_direct(replug_side: Side) -> Result {
             ping_accept(&conn, recovery)
                 .await
                 .context("STY relay: observation barrier")?;
+            sty_fixture_accept(&conn, recovery)
+                .await
+                .context("STY relay: byte-for-byte payload")?;
 
             dev.iface("eth0").unwrap().replug(initial.id()).await?;
             conn.wait_ip(recovery)
@@ -410,6 +464,9 @@ async fn run_direct_relay_direct(replug_side: Side) -> Result {
             ping_accept(&conn, recovery)
                 .await
                 .context("STY direct: final ping")?;
+            sty_fixture_accept(&conn, recovery)
+                .await
+                .context("STY direct: recovered path payload")?;
             conn.closed().await;
             Ok(())
         })
@@ -429,12 +486,18 @@ async fn run_direct_relay_direct(replug_side: Side) -> Result {
             ping_open(&conn, recovery)
                 .await
                 .context("STY relay: observation barrier")?;
+            sty_fixture_open(&conn, recovery)
+                .await
+                .context("STY relay: byte-for-byte payload")?;
             conn.wait_ip(recovery)
                 .await
                 .context("STY direct: peer must recover")?;
             ping_open(&conn, recovery)
                 .await
                 .context("STY direct: final ping")?;
+            sty_fixture_open(&conn, recovery)
+                .await
+                .context("STY direct: recovered path payload")?;
             conn.close(0u32.into(), b"bye");
             Ok(())
         })
