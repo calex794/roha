@@ -232,3 +232,154 @@ async fn relay_embed_axum() -> Result<()> {
     .std_context("timeout")??;
     Ok(())
 }
+
+
+/// Verify the real TLS reverse-proxy configuration, not merely path concatenation.
+///
+/// The test boots an axum relay backend on a private port, then a separate nginx
+/// process with TLS termination and a /prefix/ path rewrite.  A native relay
+/// client must complete the protocol handshake through nginx's WebSocket upgrade.
+///
+/// This test is intentionally ignored by the normal suite.  The dedicated CI
+/// job installs the three system tools and invokes it with \`--ignored\`.
+#[cfg(unix)]
+#[tokio::test]
+#[traced_test]
+#[ignore = "requires nginx, openssl and curl; run using the dedicated STAYA proxy CI job"]
+async fn relay_prefix_nginx_https_end_to_end() -> Result<()> {
+    use std::{
+        path::PathBuf,
+        process::{Child, Command, Stdio},
+    };
+
+    struct NginxGuard {
+        child: Child,
+        dir: PathBuf,
+    }
+    impl Drop for NginxGuard {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (backend_addr, _backend_guard) = serve_axum().await?;
+
+    // Reserve a real loopback port for the independent TLS proxy.
+    let port_picker = TcpListener::bind("127.0.0.1:0").await?;
+    let proxy_port = port_picker.local_addr()?.port();
+    drop(port_picker);
+
+    let workdir = std::env::temp_dir().join(format!(
+        "staya-relay-nginx-{}-{proxy_port}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&workdir)?;
+    let cert = workdir.join("server.pem");
+    let key = workdir.join("server.key");
+    let openssl = Command::new("openssl")
+        .args(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1"])
+        .arg("-keyout")
+        .arg(&key)
+        .arg("-out")
+        .arg(&cert)
+        .args(["-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"])
+        .output()?;
+    assert!(
+        openssl.status.success(),
+        "could not create a local TLS certificate: {}",
+        String::from_utf8_lossy(&openssl.stderr)
+    );
+
+    // nginx strips /prefix/ before forwarding to the unmodified relay backend.
+    // WebSocket upgrades must survive the extra proxy hop.
+    let config = format!(
+        r#"worker_processes 1;
+daemon off;
+pid {dir}/nginx.pid;
+error_log stderr warn;
+events {{ worker_connections 128; }}
+http {{
+    access_log off;
+    server {{
+        listen 127.0.0.1:{proxy_port} ssl;
+        server_name localhost;
+        ssl_certificate {cert};
+        ssl_certificate_key {key};
+        location /prefix/ {{
+            proxy_pass http://{backend_addr}/;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host $host;
+            proxy_read_timeout 30s;
+        }}
+    }}
+}}
+"#,
+        dir=workdir.display(),
+        cert=cert.display(),
+        key=key.display(),
+    );
+    let conf = workdir.join("nginx.conf");
+    std::fs::write(&conf, config)?;
+    let child = Command::new("nginx")
+        .arg("-p")
+        .arg(&workdir)
+        .arg("-c")
+        .arg(&conf)
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+    let _proxy_guard = NginxGuard {
+        child,
+        dir: workdir,
+    };
+
+    let base_url = format!("https://127.0.0.1:{proxy_port}");
+    let ping_url = format!("{base_url}/prefix/ping");
+    let status_for = |target: &str| -> Result<String> {
+        let output = Command::new("curl")
+            .args(["--insecure", "--silent", "--output", "/dev/null", "--max-time", "2"])
+            .args(["--write-out", "%{http_code}"])
+            .arg(target)
+            .output()?;
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+
+    let mut ready = false;
+    for _ in 0..40 {
+        if status_for(&ping_url)? == "200" {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(ready, "HTTPS /prefix/ping never became reachable through nginx");
+    assert_eq!(
+        status_for(&format!("{base_url}/ping"))?,
+        "404",
+        "unprefixed probe must not be served by the reverse proxy"
+    );
+
+    // The native client must retain /prefix/relay while changing HTTPS to WSS,
+    // then successfully upgrade and authenticate against the real relay.
+    let relay_url: RelayUrl = format!("{base_url}/prefix/").parse()?;
+    let tls_config = CaTlsConfig::insecure_skip_verify().client_config(default_provider())?;
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+    let _conn = tokio::time::timeout(
+        Duration::from_secs(10),
+        ClientBuilder::new(
+            relay_url,
+            SecretKey::from_bytes(&rng.random()),
+            DnsResolver::new(),
+        )
+        .tls_client_config(tls_config)
+        .connect(),
+    )
+    .await
+    .std_context("timeout connecting to relay over nginx HTTPS")??;
+    Ok(())
+}

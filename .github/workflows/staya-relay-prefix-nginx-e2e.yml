@@ -1,0 +1,39 @@
+name: STAYA relay TLS reverse-proxy integration
+on:
+  push:
+    branches:
+      - lab/staya-relay-prefix-nginx-e2e-20261019
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  nginx-relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: "1.91.0"
+      - name: Install local reverse proxy and TLS tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends nginx openssl curl
+      - name: Verify our noq 1.4.0 dependency remains pinned
+        run: |
+          set -euo pipefail
+          cargo +1.91.0 fetch --locked
+          python3 - <<'PY'
+          import tomllib
+          with open('Cargo.lock', 'rb') as f:
+              packages = tomllib.load(f)['package']
+          for name in ('noq', 'noq-proto', 'noq-udp'):
+              matching = [x for x in packages if x['name'] == name]
+              assert len(matching) == 1, (name, matching)
+              assert matching[0]['version'] == '1.4.0', (name, matching)
+              assert matching[0].get('source', '').startswith('git+https://github.com/calex794/noq.git'), (name, matching)
+          PY
+      - name: Run real nginx TLS prefix relay handshake and probe
+        run: cargo +1.91.0 test --locked -p iroh-relay --features server --test relay_axum relay_prefix_nginx_https_end_to_end -- --ignored --nocapture
+      - name: Verify relay prefix remains backward-compatible
+        run: cargo +1.91.0 test --locked -p iroh-relay --lib relay_route_keeps_path_prefix -- --nocapture
