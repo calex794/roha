@@ -477,7 +477,17 @@ async fn run_direct_relay_direct(
                     .await
                     .context("STY diagnostic: checked payload after restoring network")?;
             }
+            info!(
+                local_nat_candidates = ?conn.get_local_nat_traversal_addresses(),
+                remote_nat_candidates = ?conn.get_remote_nat_traversal_addresses(),
+                "STY QNT candidate snapshot before waiting for direct"
+            );
             let result = conn.wait_ip(recovery).await;
+            info!(
+                local_nat_candidates = ?conn.get_local_nat_traversal_addresses(),
+                remote_nat_candidates = ?conn.get_remote_nat_traversal_addresses(),
+                "STY QNT candidate snapshot after direct wait"
+            );
             let paths = conn
                 .paths()
                 .iter()
@@ -522,7 +532,9 @@ async fn run_direct_relay_direct(
                 .await
                 .context("STY relay: byte-for-byte payload")?;
             if notify_peer {
-                restored_rx.await.std_context("STY restored signal sender dropped")?;
+                restored_rx
+                    .await
+                    .std_context("STY restored signal sender dropped")?;
                 ep.network_change().await;
                 info!("STY diagnostic: passive peer network-change hint sent");
             }
@@ -534,7 +546,17 @@ async fn run_direct_relay_direct(
                     .await
                     .context("STY diagnostic: peer payload after network restoration")?;
             }
+            info!(
+                local_nat_candidates = ?conn.get_local_nat_traversal_addresses(),
+                remote_nat_candidates = ?conn.get_remote_nat_traversal_addresses(),
+                "STY QNT candidate snapshot before waiting for direct"
+            );
             let result = conn.wait_ip(recovery).await;
+            info!(
+                local_nat_candidates = ?conn.get_local_nat_traversal_addresses(),
+                remote_nat_candidates = ?conn.get_remote_nat_traversal_addresses(),
+                "STY QNT candidate snapshot after direct wait"
+            );
             let paths = conn
                 .paths()
                 .iter()
