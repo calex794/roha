@@ -207,6 +207,14 @@ impl IpTransport {
             Poll::Ready(Ok(n)) => {
                 for i in 0..n {
                     let meta = &mut metas[i];
+                    // Raw packet metadata only. Compare UDP delivered to the
+                    // pre-replug endpoint with the fresh-endpoint control.
+                    trace!(
+                        target: "staya_p2p_udp",
+                        local = %self.local_addr.get(),
+                        remote = %meta.addr,
+                        "STY direct-recovery UDP receive"
+                    );
                     let recv_info = &mut recv_infos[i];
                     if meta.addr.is_ipv4() {
                         // The AsyncUdpSocket is an AF_INET6 socket and needs to show this
@@ -276,7 +284,16 @@ pub(super) struct IpNetworkChangeSender {
 impl IpNetworkChangeSender {
     pub(super) fn rebind(&self) -> io::Result<()> {
         let old_addr = self.local_addr.get();
-        self.socket.rebind()?;
+        let closed_before = self.socket.is_closed();
+        let result = self.socket.rebind();
+        debug!(
+            target: "staya_p2p_udp",
+            %old_addr,
+            closed_before,
+            ?result,
+            "STY direct-recovery socket rebind"
+        );
+        result?;
         let addr = self.socket.local_addr()?;
         self.local_addr.set(addr).ok();
         trace!("rebound from {} to {}", old_addr, addr);
@@ -338,6 +355,13 @@ impl IpSender {
 
         match res {
             Poll::Ready(Ok(res)) => {
+                trace!(
+                    target: "staya_p2p_udp",
+                    %dst,
+                    ?src,
+                    total_bytes,
+                    "STY direct-recovery UDP transmit"
+                );
                 match dst {
                     SocketAddr::V4(_) => {
                         self.metrics.send_ipv4.inc_by(total_bytes);
@@ -348,7 +372,16 @@ impl IpSender {
                 }
                 Poll::Ready(Ok(res))
             }
-            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Ready(Err(err)) => {
+                debug!(
+                    target: "staya_p2p_udp",
+                    %dst,
+                    ?src,
+                    %err,
+                    "STY direct-recovery UDP transmit failed"
+                );
+                Poll::Ready(Err(err))
+            }
             Poll::Pending => Poll::Pending,
         }
     }
