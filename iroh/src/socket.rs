@@ -818,6 +818,12 @@ impl DirectAddrUpdateState {
 
                 match fut.await {
                     Some(Ok(report)) => {
+                        debug!(
+                            ?why,
+                            global_v4 = ?report.global_v4,
+                            global_v6 = ?report.global_v6,
+                            "STY_DIAG: direct address report after network change"
+                        );
                         sock.net_report.set((Some(report), why)).ok();
                     }
                     Some(Err(time::Elapsed { .. })) => {
