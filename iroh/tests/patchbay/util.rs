@@ -236,7 +236,7 @@ impl Pair {
         let barrier_server = Arc::new(Barrier::new(2));
         let barrier_client = barrier_server.clone();
 
-        let server_task = server_device.spawn(|dev| {
+        let server_task = server_device.spawn(move |dev| {
             async move {
                 let mut builder = endpoint_builder(&dev, relay_map2);
                 if let Some(port) = server_udp_port {
