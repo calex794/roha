@@ -406,7 +406,11 @@ async fn sty_fixture_accept(conn: &Connection, timeout: Duration) -> Result {
 /// This is a *transport-only* regression: it does not move user files or grant
 /// any FsStore/File Gate authority. The access router becomes unable to use UDP
 /// except for DNS, while its TCP relay access remains available.
-async fn run_direct_relay_direct(replug_side: Side, probe_after_replug: bool) -> Result {
+async fn run_direct_relay_direct(
+    replug_side: Side,
+    probe_after_replug: bool,
+    notify_peer: bool,
+) -> Result {
     let (lab, relay_map, _relay_guard, guard) = lab_with_relay(testdir!()).await?;
     let initial = lab.add_router("initial").nat(Nat::Moderate).build().await?;
     let blocked = lab
@@ -429,8 +433,9 @@ async fn run_direct_relay_direct(replug_side: Side, probe_after_replug: bool) ->
 
     let setup = Duration::from_secs(20);
     let recovery = Duration::from_secs(45);
+    let (restored_tx, restored_rx) = oneshot::channel::<()>();
     Pair::new(relay_map)
-        .left(replug_side, replug, async move |dev, _ep, conn| {
+        .left(replug_side, replug, async move |dev, ep, conn| {
             conn.wait_ip(setup)
                 .await
                 .context("STY direct: first direct path")?;
@@ -440,6 +445,7 @@ async fn run_direct_relay_direct(replug_side: Side, probe_after_replug: bool) ->
 
             info!("STY_PATH_DIRECT_TO_RELAY: replugging into UDP-blocked access");
             dev.iface("eth0").unwrap().replug(blocked.id()).await?;
+            info!(advertised = ?ep.addr(), "STY address after UDP-blocked replug");
             // Drive the same connection while UDP to the peer is unavailable.
             ping_accept(&conn, recovery)
                 .await
@@ -457,6 +463,10 @@ async fn run_direct_relay_direct(replug_side: Side, probe_after_replug: bool) ->
                 .context("STY relay: byte-for-byte payload")?;
 
             dev.iface("eth0").unwrap().replug(initial.id()).await?;
+            info!(advertised = ?ep.addr(), "STY address immediately after restoring network");
+            if notify_peer {
+                let _ = restored_tx.send(());
+            }
             if probe_after_replug {
                 // Diagnose whether resumed application traffic stimulates path recovery.
                 // Keep the original idle recovery test as a separate, mandatory case.
@@ -473,7 +483,14 @@ async fn run_direct_relay_direct(replug_side: Side, probe_after_replug: bool) ->
                 .iter()
                 .map(|p| (p.remote_addr().to_string(), p.is_selected(), p.is_ip()))
                 .collect::<Vec<_>>();
-            info!(?paths, probe_after_replug, success = result.is_ok(), "STY server recovery paths");
+            info!(
+                ?paths,
+                advertised = ?ep.addr(),
+                probe_after_replug,
+                notify_peer,
+                success = result.is_ok(),
+                "STY server recovery paths"
+            );
             result.context("STY direct: path must recover after replug")?;
             info!("STY_PATH_DIRECT_RECOVERED");
             ping_accept(&conn, recovery)
@@ -485,7 +502,7 @@ async fn run_direct_relay_direct(replug_side: Side, probe_after_replug: bool) ->
             conn.closed().await;
             Ok(())
         })
-        .right(peer, async move |_dev, _ep, conn| {
+        .right(peer, async move |_dev, ep, conn| {
             conn.wait_ip(setup)
                 .await
                 .context("STY direct: peer initial path")?;
@@ -504,6 +521,11 @@ async fn run_direct_relay_direct(replug_side: Side, probe_after_replug: bool) ->
             sty_fixture_open(&conn, recovery)
                 .await
                 .context("STY relay: byte-for-byte payload")?;
+            if notify_peer {
+                restored_rx.await.std_context("STY restored signal sender dropped")?;
+                ep.network_change().await;
+                info!("STY diagnostic: passive peer network-change hint sent");
+            }
             if probe_after_replug {
                 ping_open(&conn, recovery)
                     .await
@@ -518,7 +540,13 @@ async fn run_direct_relay_direct(replug_side: Side, probe_after_replug: bool) ->
                 .iter()
                 .map(|p| (p.remote_addr().to_string(), p.is_selected(), p.is_ip()))
                 .collect::<Vec<_>>();
-            info!(?paths, probe_after_replug, success = result.is_ok(), "STY peer recovery paths");
+            info!(
+                ?paths,
+                probe_after_replug,
+                notify_peer,
+                success = result.is_ok(),
+                "STY peer recovery paths"
+            );
             result.context("STY direct: peer must recover")?;
             ping_open(&conn, recovery)
                 .await
@@ -538,17 +566,23 @@ async fn run_direct_relay_direct(replug_side: Side, probe_after_replug: bool) ->
 #[tokio::test]
 #[traced_test]
 async fn direct_relay_direct_client_replug() -> Result {
-    run_direct_relay_direct(Side::Client, false).await
+    run_direct_relay_direct(Side::Client, false, false).await
 }
 
 #[tokio::test]
 #[traced_test]
 async fn direct_relay_direct_server_replug() -> Result {
-    run_direct_relay_direct(Side::Server, false).await
+    run_direct_relay_direct(Side::Server, false, false).await
 }
 
 #[tokio::test]
 #[traced_test]
 async fn direct_relay_direct_server_with_traffic_probe() -> Result {
-    run_direct_relay_direct(Side::Server, true).await
+    run_direct_relay_direct(Side::Server, true, false).await
+}
+
+#[tokio::test]
+#[traced_test]
+async fn direct_relay_direct_server_with_peer_network_hint() -> Result {
+    run_direct_relay_direct(Side::Server, false, true).await
 }
