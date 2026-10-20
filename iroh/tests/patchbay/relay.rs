@@ -660,7 +660,7 @@ async fn direct_relay_direct_server_fresh_connection_control() -> Result {
 /// mapping rather than an intrinsically unpunchable restored topology. If this
 /// fresh pair is also relayed, inspect the emulated NAT/firewall rules before
 /// changing production routing. This intentionally uses no Akula user files.
-async fn run_server_replug_new_endpoint_control(reuse_device: bool) -> Result {
+async fn run_server_replug_new_endpoint_control(reuse_device: bool, reuse_port: bool) -> Result {
     let (lab, relay_map, _relay_guard, guard) = lab_with_relay(testdir!()).await?;
     let initial_id = lab
         .add_router("initial")
@@ -692,13 +692,24 @@ async fn run_server_replug_new_endpoint_control(reuse_device: bool) -> Result {
     let reusable_server = old_server.clone();
     let reusable_client = old_client.clone();
     let (restored_tx, restored_rx) = oneshot::channel::<()>();
+    let (server_port_tx, server_port_rx) = oneshot::channel::<u16>();
+    let (client_port_tx, client_port_rx) = oneshot::channel::<u16>();
     let setup = Duration::from_secs(20);
     let recovery = Duration::from_secs(45);
 
     // First establish direct connectivity, switch to our own relay, and
     // restore the server's original uplink on the *old* pair.
     Pair::new(relay_map.clone())
-        .server(old_server, async move |dev, _ep, conn| {
+        .server(old_server, async move |dev, ep, conn| {
+            let port = ep
+                .bound_sockets()
+                .iter()
+                .find(|addr| addr.is_ipv4())
+                .context("STY original server IPv4 socket missing")?
+                .port();
+            server_port_tx
+                .send(port)
+                .map_err(|_| anyerr!("STY original server port receiver dropped"))?;
             conn.wait_ip(setup)
                 .await
                 .context("old server initially direct")?;
@@ -731,9 +742,21 @@ async fn run_server_replug_new_endpoint_control(reuse_device: bool) -> Result {
                 "STY old server paths immediately after network restoration"
             );
             conn.closed().await;
+            tokio::time::timeout(recovery, ep.close())
+                .await
+                .std_context("STY old server Endpoint close timed out")?;
             Ok(())
         })
-        .client(old_client, async move |_dev, _ep, conn| {
+        .client(old_client, async move |_dev, ep, conn| {
+            let port = ep
+                .bound_sockets()
+                .iter()
+                .find(|addr| addr.is_ipv4())
+                .context("STY original client IPv4 socket missing")?
+                .port();
+            client_port_tx
+                .send(port)
+                .map_err(|_| anyerr!("STY original client port receiver dropped"))?;
             conn.wait_ip(setup)
                 .await
                 .context("old client initially direct")?;
@@ -756,10 +779,27 @@ async fn run_server_replug_new_endpoint_control(reuse_device: bool) -> Result {
                 .await
                 .context("old client relay after server restoration")?;
             conn.close(0u32.into(), b"old-pair-control-done");
+            tokio::time::timeout(recovery, ep.close())
+                .await
+                .std_context("STY old client Endpoint close timed out")?;
             Ok(())
         })
         .run()
         .await?;
+
+    let old_server_port = server_port_rx
+        .await
+        .std_context("STY original server UDP port was not recorded")?;
+    let old_client_port = client_port_rx
+        .await
+        .std_context("STY original client UDP port was not recorded")?;
+    info!(
+        old_server_port,
+        old_client_port,
+        reuse_device,
+        reuse_port,
+        "STY port persistence experiment"
+    );
 
     // Same topology, but separate the two dimensions: a new Endpoint + UDP
     // socket on the ORIGINAL device, versus a new Endpoint on a NEW device.
@@ -780,8 +820,27 @@ async fn run_server_replug_new_endpoint_control(reuse_device: bool) -> Result {
             .build()
             .await?
     };
-    Pair::new(relay_map)
+    let mut new_pair = Pair::new(relay_map);
+    if reuse_port {
+        // The prior endpoints were explicitly closed; bind the new sockets
+        // to precisely the same ports without preserving Endpoint/Noq state.
+        new_pair = new_pair.udp_ports(old_server_port, old_client_port);
+    }
+    new_pair
         .server(fresh_server, async move |_dev, ep, conn| {
+            let new_ipv4_port = ep
+                .bound_sockets()
+                .iter()
+                .find(|addr| addr.is_ipv4())
+                .context("STY replacement server IPv4 socket missing")?
+                .port();
+            if reuse_port {
+                ensure_any!(
+                    new_ipv4_port == old_server_port,
+                    "STY replacement server reused wrong UDP port"
+                );
+            }
+            info!(old_server_port, new_ipv4_port, reuse_port, "STY server UDP port comparison");
             info!(
                 endpoint = %ep.id().fmt_short(),
                 sockets = ?ep.bound_sockets(),
@@ -791,6 +850,7 @@ async fn run_server_replug_new_endpoint_control(reuse_device: bool) -> Result {
             info!(
                 selected_direct = result.is_ok(),
                 reuse_device,
+                reuse_port,
                 fresh_paths = ?conn
                     .paths()
                     .iter()
@@ -809,6 +869,19 @@ async fn run_server_replug_new_endpoint_control(reuse_device: bool) -> Result {
             Ok(())
         })
         .client(fresh_client, async move |_dev, ep, conn| {
+            let new_ipv4_port = ep
+                .bound_sockets()
+                .iter()
+                .find(|addr| addr.is_ipv4())
+                .context("STY replacement client IPv4 socket missing")?
+                .port();
+            if reuse_port {
+                ensure_any!(
+                    new_ipv4_port == old_client_port,
+                    "STY replacement client reused wrong UDP port"
+                );
+            }
+            info!(old_client_port, new_ipv4_port, reuse_port, "STY client UDP port comparison");
             info!(
                 endpoint = %ep.id().fmt_short(),
                 sockets = ?ep.bound_sockets(),
@@ -818,6 +891,7 @@ async fn run_server_replug_new_endpoint_control(reuse_device: bool) -> Result {
             info!(
                 selected_direct = result.is_ok(),
                 reuse_device,
+                reuse_port,
                 fresh_paths = ?conn
                     .paths()
                     .iter()
@@ -844,7 +918,7 @@ async fn run_server_replug_new_endpoint_control(reuse_device: bool) -> Result {
 #[tokio::test]
 #[traced_test]
 async fn direct_relay_direct_server_fresh_nodes_control() -> Result {
-    run_server_replug_new_endpoint_control(false).await
+    run_server_replug_new_endpoint_control(false, false).await
 }
 
 /// Discriminator for old OS-network-device state vs the state held by an old
@@ -853,5 +927,11 @@ async fn direct_relay_direct_server_fresh_nodes_control() -> Result {
 #[tokio::test]
 #[traced_test]
 async fn direct_relay_direct_server_recreated_endpoints_same_devices() -> Result {
-    run_server_replug_new_endpoint_control(true).await
+    run_server_replug_new_endpoint_control(true, false).await
+}
+
+#[tokio::test]
+#[traced_test]
+async fn direct_relay_direct_server_recreated_endpoints_same_devices_same_ports() -> Result {
+    run_server_replug_new_endpoint_control(true, true).await
 }
