@@ -660,14 +660,10 @@ async fn direct_relay_direct_server_fresh_connection_control() -> Result {
 /// mapping rather than an intrinsically unpunchable restored topology. If this
 /// fresh pair is also relayed, inspect the emulated NAT/firewall rules before
 /// changing production routing. This intentionally uses no Akula user files.
-async fn run_server_replug_new_endpoint_control(reuse_device: bool, reuse_port: bool) -> Result {
+async fn run_server_replug_new_endpoint_control(reuse_device: bool, reuse_port: bool, flush_nat: bool) -> Result {
     let (lab, relay_map, _relay_guard, guard) = lab_with_relay(testdir!()).await?;
-    let initial_id = lab
-        .add_router("initial")
-        .nat(Nat::Moderate)
-        .build()
-        .await?
-        .id();
+    let initial_router = lab.add_router("initial").nat(Nat::Moderate).build().await?;
+    let initial_id = initial_router.id();
     let blocked_id = lab
         .add_router("blocked")
         .nat(Nat::Moderate)
@@ -787,6 +783,11 @@ async fn run_server_replug_new_endpoint_control(reuse_device: bool, reuse_port: 
         .run()
         .await?;
 
+    if flush_nat {
+        initial_router.flush_nat_state().await.context("STY reset simulated NAT conntrack")?;
+        info!("STY restored-server NAT state flushed");
+    }
+
     let old_server_port = server_port_rx
         .await
         .std_context("STY original server UDP port was not recorded")?;
@@ -795,7 +796,7 @@ async fn run_server_replug_new_endpoint_control(reuse_device: bool, reuse_port: 
         .std_context("STY original client UDP port was not recorded")?;
     info!(
         old_server_port,
-        old_client_port, reuse_device, reuse_port, "STY port persistence experiment"
+        old_client_port, reuse_device, reuse_port, flush_nat, "STY port persistence experiment"
     );
 
     // Same topology, but separate the two dimensions: a new Endpoint + UDP
@@ -921,7 +922,7 @@ async fn run_server_replug_new_endpoint_control(reuse_device: bool, reuse_port: 
 #[tokio::test]
 #[traced_test]
 async fn direct_relay_direct_server_fresh_nodes_control() -> Result {
-    run_server_replug_new_endpoint_control(false, false).await
+    run_server_replug_new_endpoint_control(false, false, false).await
 }
 
 /// Discriminator for old OS-network-device state vs the state held by an old
@@ -930,11 +931,19 @@ async fn direct_relay_direct_server_fresh_nodes_control() -> Result {
 #[tokio::test]
 #[traced_test]
 async fn direct_relay_direct_server_recreated_endpoints_same_devices() -> Result {
-    run_server_replug_new_endpoint_control(true, false).await
+    run_server_replug_new_endpoint_control(true, false, false).await
 }
 
 #[tokio::test]
 #[traced_test]
 async fn direct_relay_direct_server_recreated_endpoints_same_devices_same_ports() -> Result {
-    run_server_replug_new_endpoint_control(true, true).await
+    run_server_replug_new_endpoint_control(true, true, false).await
+}
+
+/// Compare an identical new-port-binding control after flushing only
+/// the restored server router's test NAT conntrack state.
+#[tokio::test]
+#[traced_test]
+async fn direct_relay_direct_server_same_ports_after_nat_flush() -> Result {
+    run_server_replug_new_endpoint_control(true, true, true).await
 }
