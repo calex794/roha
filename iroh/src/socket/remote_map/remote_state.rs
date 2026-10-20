@@ -95,7 +95,6 @@ fn enqueue_pending_open_path(
     pending.push_back(addr.clone());
 }
 
-
 /// A stream of events from all paths for all connections.
 ///
 /// The connection is identified using [`ConnId`].  The event `Err` variant happens when the
@@ -1589,9 +1588,10 @@ mod tests {
     use super::*;
 
     fn pending_path(port: u16) -> transports::FourTuple {
-        transports::FourTuple::from_remote(transports::Addr::Ip(
-            SocketAddr::from(([127, 0, 0, 1], port)),
-        ))
+        transports::FourTuple::from_remote(transports::Addr::Ip(SocketAddr::from((
+            [127, 0, 0, 1],
+            port,
+        ))))
     }
 
     #[test]
@@ -1630,7 +1630,6 @@ mod tests {
         }
         assert_eq!(queue.len(), 64);
     }
-
 
     #[tokio::test]
     async fn blocked_relay_does_not_delay_direct_initial() {
