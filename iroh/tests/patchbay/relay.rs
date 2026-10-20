@@ -410,6 +410,7 @@ async fn run_direct_relay_direct(
     replug_side: Side,
     probe_after_replug: bool,
     notify_peer: bool,
+    fresh_connection_control: bool,
 ) -> Result {
     let (lab, relay_map, _relay_guard, guard) = lab_with_relay(testdir!()).await?;
     let initial = lab.add_router("initial").nat(Nat::Moderate).build().await?;
@@ -434,6 +435,7 @@ async fn run_direct_relay_direct(
     let setup = Duration::from_secs(20);
     let recovery = Duration::from_secs(45);
     let (restored_tx, restored_rx) = oneshot::channel::<()>();
+    let (fresh_addr_tx, fresh_addr_rx) = oneshot::channel::<iroh::EndpointAddr>();
     Pair::new(relay_map)
         .left(replug_side, replug, async move |dev, ep, conn| {
             conn.wait_ip(setup)
@@ -466,6 +468,37 @@ async fn run_direct_relay_direct(
             info!(advertised = ?ep.addr(), "STY address immediately after restoring network");
             if notify_peer {
                 let _ = restored_tx.send(());
+            }
+            if fresh_connection_control {
+                // Control: a new QUIC connection on the *same endpoints* after
+                // a server-side move. Distinguishes NAT reachability from stale
+                // state of the original multipath connection.
+                fresh_addr_tx
+                    .send(ep.addr())
+                    .map_err(|_| anyerr!("STY fresh control: peer closed address channel"))?;
+                let incoming = tokio::time::timeout(recovery, ep.accept())
+                    .await
+                    .std_context("STY fresh control: server accept timed out")?
+                    .context("STY fresh control: endpoint closed")?;
+                let fresh = incoming
+                    .accept()
+                    .anyerr()?
+                    .await
+                    .context("STY fresh control: server handshake")?;
+                let direct = fresh.wait_ip(Duration::from_secs(12)).await;
+                info!(
+                    selected_direct = direct.is_ok(),
+                    fresh_paths = ?fresh
+                        .paths()
+                        .iter()
+                        .map(|p| (p.remote_addr().to_string(), p.is_selected()))
+                        .collect::<Vec<_>>(),
+                    "STY fresh-control server result"
+                );
+                ping_accept(&fresh, recovery)
+                    .await
+                    .context("STY fresh control: server ping")?;
+                fresh.closed().await;
             }
             if probe_after_replug {
                 // Diagnose whether resumed application traffic stimulates path recovery.
@@ -528,6 +561,29 @@ async fn run_direct_relay_direct(
                 ep.network_change().await;
                 info!("STY diagnostic: passive peer network-change hint sent");
             }
+            if fresh_connection_control {
+                let addr = fresh_addr_rx
+                    .await
+                    .std_context("STY fresh control: address channel dropped")?;
+                let fresh = tokio::time::timeout(recovery, ep.connect(addr, b"test"))
+                    .await
+                    .std_context("STY fresh control: connection timed out")?
+                    .context("STY fresh control: connection failed")?;
+                let direct = fresh.wait_ip(Duration::from_secs(12)).await;
+                info!(
+                    selected_direct = direct.is_ok(),
+                    fresh_paths = ?fresh
+                        .paths()
+                        .iter()
+                        .map(|p| (p.remote_addr().to_string(), p.is_selected()))
+                        .collect::<Vec<_>>(),
+                    "STY fresh-control client result"
+                );
+                ping_open(&fresh, recovery)
+                    .await
+                    .context("STY fresh control: client ping")?;
+                fresh.close(0u32.into(), b"control-complete");
+            }
             if probe_after_replug {
                 ping_open(&conn, recovery)
                     .await
@@ -568,23 +624,29 @@ async fn run_direct_relay_direct(
 #[tokio::test]
 #[traced_test]
 async fn direct_relay_direct_client_replug() -> Result {
-    run_direct_relay_direct(Side::Client, false, false).await
+    run_direct_relay_direct(Side::Client, false, false, false).await
 }
 
 #[tokio::test]
 #[traced_test]
 async fn direct_relay_direct_server_replug() -> Result {
-    run_direct_relay_direct(Side::Server, false, false).await
+    run_direct_relay_direct(Side::Server, false, false, false).await
 }
 
 #[tokio::test]
 #[traced_test]
 async fn direct_relay_direct_server_with_traffic_probe() -> Result {
-    run_direct_relay_direct(Side::Server, true, false).await
+    run_direct_relay_direct(Side::Server, true, false, false).await
 }
 
 #[tokio::test]
 #[traced_test]
 async fn direct_relay_direct_server_with_peer_network_hint() -> Result {
-    run_direct_relay_direct(Side::Server, false, true).await
+    run_direct_relay_direct(Side::Server, false, true, false).await
+}
+
+#[tokio::test]
+#[traced_test]
+async fn direct_relay_direct_server_fresh_connection_control() -> Result {
+    run_direct_relay_direct(Side::Server, false, false, true).await
 }
