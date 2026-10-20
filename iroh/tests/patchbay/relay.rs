@@ -650,3 +650,152 @@ async fn direct_relay_direct_server_with_peer_network_hint() -> Result {
 async fn direct_relay_direct_server_fresh_connection_control() -> Result {
     run_direct_relay_direct(Side::Server, false, false, true).await
 }
+
+/// STY-RN-5 isolation control: after the *server* moves through an UDP-blocked
+/// network and back, start two NEW devices with NEW QUIC endpoints and UDP
+/// sockets behind the original routers.
+///
+/// A direct path on this fresh pair, contrasted with the established session's
+/// failure to recover, points to state retained by the original endpoint or NAT
+/// mapping rather than an intrinsically unpunchable restored topology. If this
+/// fresh pair is also relayed, inspect the emulated NAT/firewall rules before
+/// changing production routing. This intentionally uses no Akula user files.
+#[tokio::test]
+#[traced_test]
+async fn direct_relay_direct_server_fresh_nodes_control() -> Result {
+    let (lab, relay_map, _relay_guard, guard) = lab_with_relay(testdir!()).await?;
+    let initial_id = lab.add_router("initial").nat(Nat::Moderate).build().await?.id();
+    let blocked_id = lab
+        .add_router("blocked")
+        .nat(Nat::Moderate)
+        .firewall_custom(block_udp_except_dns)
+        .build()
+        .await?
+        .id();
+    let peer_id = lab.add_router("peer_net").nat(Nat::Moderate).build().await?.id();
+    let old_server = lab.add_device("old_server").uplink(initial_id).build().await?;
+    let old_client = lab.add_device("old_client").uplink(peer_id).build().await?;
+    let (restored_tx, restored_rx) = oneshot::channel::<()>();
+    let setup = Duration::from_secs(20);
+    let recovery = Duration::from_secs(45);
+
+    // First establish direct connectivity, switch to our own relay, and
+    // restore the server's original uplink on the *old* pair.
+    Pair::new(relay_map.clone())
+        .server(old_server, async move |dev, _ep, conn| {
+            conn.wait_ip(setup).await.context("old server initially direct")?;
+            ping_accept(&conn, setup).await.context("old server initial ping")?;
+            dev.iface("eth0").unwrap().replug(blocked_id).await?;
+            ping_accept(&conn, recovery).await.context("old server fallback ping")?;
+            conn.wait_selected(recovery, |p| p.is_relay())
+                .await
+                .context("old server fallback must select relay")?;
+            sty_fixture_accept(&conn, recovery)
+                .await
+                .context("old server checked relay bytes")?;
+            dev.iface("eth0").unwrap().replug(initial_id).await?;
+            restored_tx
+                .send(())
+                .map_err(|_| anyerr!("fresh nodes control: restoration notification lost"))?;
+            ping_accept(&conn, recovery)
+                .await
+                .context("old server relay still carries traffic after restoration")?;
+            info!(
+                old_paths = ?conn
+                    .paths()
+                    .iter()
+                    .map(|p| (p.remote_addr().to_string(), p.is_selected(), p.is_ip()))
+                    .collect::<Vec<_>>(),
+                "STY old server paths immediately after network restoration"
+            );
+            conn.closed().await;
+            Ok(())
+        })
+        .client(old_client, async move |_dev, _ep, conn| {
+            conn.wait_ip(setup).await.context("old client initially direct")?;
+            ping_open(&conn, setup).await.context("old client initial ping")?;
+            ping_open(&conn, recovery).await.context("old client fallback ping")?;
+            conn.wait_selected(recovery, |p| p.is_relay())
+                .await
+                .context("old client fallback must select relay")?;
+            sty_fixture_open(&conn, recovery)
+                .await
+                .context("old client checked relay bytes")?;
+            restored_rx
+                .await
+                .std_context("fresh nodes control: server restoration notification dropped")?;
+            ping_open(&conn, recovery)
+                .await
+                .context("old client relay after server restoration")?;
+            conn.close(0u32.into(), b"old-pair-control-done");
+            Ok(())
+        })
+        .run()
+        .await?;
+
+    // Use fresh virtual machines/IP addresses and new QUIC endpoints, NOT a
+    // second Connection on the old Endpoint. Router/NAT types are unchanged.
+    let fresh_server = lab
+        .add_device("fresh_server")
+        .uplink(initial_id)
+        .build()
+        .await?;
+    let fresh_client = lab
+        .add_device("fresh_client")
+        .uplink(peer_id)
+        .build()
+        .await?;
+    Pair::new(relay_map)
+        .server(fresh_server, async move |_dev, ep, conn| {
+            info!(
+                endpoint = %ep.id().fmt_short(),
+                sockets = ?ep.bound_sockets(),
+                "STY fresh server endpoint and sockets"
+            );
+            let result = conn.wait_ip(recovery).await;
+            info!(
+                selected_direct = result.is_ok(),
+                fresh_paths = ?conn
+                    .paths()
+                    .iter()
+                    .map(|p| (p.remote_addr().to_string(), p.is_selected(), p.is_ip()))
+                    .collect::<Vec<_>>(),
+                "STY fresh NODES server control"
+            );
+            result.context("fresh nodes server must become direct")?;
+            ping_accept(&conn, recovery).await.context("fresh nodes server ping")?;
+            sty_fixture_accept(&conn, recovery)
+                .await
+                .context("fresh nodes server checked direct bytes")?;
+            conn.closed().await;
+            Ok(())
+        })
+        .client(fresh_client, async move |_dev, ep, conn| {
+            info!(
+                endpoint = %ep.id().fmt_short(),
+                sockets = ?ep.bound_sockets(),
+                "STY fresh client endpoint and sockets"
+            );
+            let result = conn.wait_ip(recovery).await;
+            info!(
+                selected_direct = result.is_ok(),
+                fresh_paths = ?conn
+                    .paths()
+                    .iter()
+                    .map(|p| (p.remote_addr().to_string(), p.is_selected(), p.is_ip()))
+                    .collect::<Vec<_>>(),
+                "STY fresh NODES client control"
+            );
+            result.context("fresh nodes client must become direct")?;
+            ping_open(&conn, recovery).await.context("fresh nodes client ping")?;
+            sty_fixture_open(&conn, recovery)
+                .await
+                .context("fresh nodes client checked direct bytes")?;
+            conn.close(0u32.into(), b"fresh-pair-control-done");
+            Ok(())
+        })
+        .run()
+        .await?;
+    guard.ok();
+    Ok(())
+}
