@@ -660,9 +660,7 @@ async fn direct_relay_direct_server_fresh_connection_control() -> Result {
 /// mapping rather than an intrinsically unpunchable restored topology. If this
 /// fresh pair is also relayed, inspect the emulated NAT/firewall rules before
 /// changing production routing. This intentionally uses no Akula user files.
-#[tokio::test]
-#[traced_test]
-async fn direct_relay_direct_server_fresh_nodes_control() -> Result {
+async fn run_server_replug_new_endpoint_control(reuse_device: bool) -> Result {
     let (lab, relay_map, _relay_guard, guard) = lab_with_relay(testdir!()).await?;
     let initial_id = lab
         .add_router("initial")
@@ -689,6 +687,10 @@ async fn direct_relay_direct_server_fresh_nodes_control() -> Result {
         .build()
         .await?;
     let old_client = lab.add_device("old_client").uplink(peer_id).build().await?;
+    // Patchbay Device is a cloneable handle; keep the same network namespace
+    // for the endpoint-only control, versus fresh devices in the baseline.
+    let reusable_server = old_server.clone();
+    let reusable_client = old_client.clone();
     let (restored_tx, restored_rx) = oneshot::channel::<()>();
     let setup = Duration::from_secs(20);
     let recovery = Duration::from_secs(45);
@@ -759,18 +761,25 @@ async fn direct_relay_direct_server_fresh_nodes_control() -> Result {
         .run()
         .await?;
 
-    // Use fresh virtual machines/IP addresses and new QUIC endpoints, NOT a
-    // second Connection on the old Endpoint. Router/NAT types are unchanged.
-    let fresh_server = lab
-        .add_device("fresh_server")
-        .uplink(initial_id)
-        .build()
-        .await?;
-    let fresh_client = lab
-        .add_device("fresh_client")
-        .uplink(peer_id)
-        .build()
-        .await?;
+    // Same topology, but separate the two dimensions: a new Endpoint + UDP
+    // socket on the ORIGINAL device, versus a new Endpoint on a NEW device.
+    // The preceding Pair::run has returned and dropped its old endpoints.
+    let fresh_server = if reuse_device {
+        reusable_server
+    } else {
+        lab.add_device("fresh_server")
+            .uplink(initial_id)
+            .build()
+            .await?
+    };
+    let fresh_client = if reuse_device {
+        reusable_client
+    } else {
+        lab.add_device("fresh_client")
+            .uplink(peer_id)
+            .build()
+            .await?
+    };
     Pair::new(relay_map)
         .server(fresh_server, async move |_dev, ep, conn| {
             info!(
@@ -781,6 +790,7 @@ async fn direct_relay_direct_server_fresh_nodes_control() -> Result {
             let result = conn.wait_ip(recovery).await;
             info!(
                 selected_direct = result.is_ok(),
+                reuse_device,
                 fresh_paths = ?conn
                     .paths()
                     .iter()
@@ -807,6 +817,7 @@ async fn direct_relay_direct_server_fresh_nodes_control() -> Result {
             let result = conn.wait_ip(recovery).await;
             info!(
                 selected_direct = result.is_ok(),
+                reuse_device,
                 fresh_paths = ?conn
                     .paths()
                     .iter()
@@ -828,4 +839,19 @@ async fn direct_relay_direct_server_fresh_nodes_control() -> Result {
         .await?;
     guard.ok();
     Ok(())
+}
+
+#[tokio::test]
+#[traced_test]
+async fn direct_relay_direct_server_fresh_nodes_control() -> Result {
+    run_server_replug_new_endpoint_control(false).await
+}
+
+/// Discriminator for old OS-network-device state vs the state held by an old
+/// Iroh/Noq endpoint: the new endpoints bind NEW UDP sockets but run in the
+/// SAME device namespaces that were switched away and back.
+#[tokio::test]
+#[traced_test]
+async fn direct_relay_direct_server_recreated_endpoints_same_devices() -> Result {
+    run_server_replug_new_endpoint_control(true).await
 }
