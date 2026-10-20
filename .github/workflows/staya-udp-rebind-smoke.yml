@@ -1,0 +1,50 @@
+name: Staya UDP Rebind Smoke
+
+on:
+  pull_request:
+    paths:
+      - "iroh/src/socket/transports/ip.rs"
+      - ".github/workflows/staya-udp-rebind-smoke.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staya-udp-rebind-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  udp-rebind-recovery:
+    name: Hosted FTR-66 UDP rebind regression
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      RUST_BACKTRACE: "1"
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run existing three FTR-66 regression cases only
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p iroh --lib failed_rebind_ -- --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/staya-udp-rebind.log"
+      - name: Ensure lockfile unchanged
+        run: git diff --exit-code Cargo.lock
+      - name: Preserve failure logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: staya-udp-rebind-${{ github.sha }}
+          path: ${{ runner.temp }}/staya-udp-rebind.log
+          retention-days: 7
+          if-no-files-found: ignore
