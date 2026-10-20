@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 45
     env:
       RUST_BACKTRACE: "1"
-      RUST_LOG: "info,iroh::socket::remote_map::remote_state=trace,iroh::_events::qnt=debug,noq_proto::n0_nat_traversal=trace"
+      RUST_LOG: "info,iroh::socket=debug,iroh::socket::remote_map::remote_state=trace,iroh::_events::qnt=debug,noq_proto::n0_nat_traversal=trace"
     steps:
       - name: Checkout exact candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
