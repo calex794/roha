@@ -34,6 +34,12 @@ jobs:
         with:
           toolchain: stable
 
+      - name: Install NAT inspection tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y conntrack
+          command -v conntrack
+
       - name: Check unprivileged network namespaces
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
