@@ -112,6 +112,8 @@ pub(crate) struct Pair {
     client_dev: Option<Device>,
     server_fn: Option<RunFn>,
     client_fn: Option<RunFn>,
+    server_udp_port: Option<u16>,
+    client_udp_port: Option<u16>,
 }
 
 impl Pair {
@@ -123,7 +125,17 @@ impl Pair {
             client_dev: None,
             server_fn: None,
             client_fn: None,
+            server_udp_port: None,
+            client_udp_port: None,
         }
+    }
+
+    /// Pins a specific IPv4 UDP port for the endpoint sockets of this pair.
+    /// Only used by STY-RN-5 fault isolation; normal tests choose free ports.
+    pub(crate) fn udp_ports(mut self, server_port: u16, client_port: u16) -> Self {
+        self.server_udp_port = Some(server_port);
+        self.client_udp_port = Some(client_port);
+        self
     }
 
     /// Places a device and closure on the given [`Side`].
@@ -209,6 +221,8 @@ impl Pair {
 
         let (addr_tx, addr_rx) = oneshot::channel();
         let relay_map2 = self.relay_map.clone();
+        let server_udp_port = self.server_udp_port;
+        let client_udp_port = self.client_udp_port;
 
         // Create an in-memory synchronization barrier to wait for both run functions to complete
         // before dropping endpoints. We use this to guarantee completion without awaiting
@@ -224,10 +238,13 @@ impl Pair {
 
         let server_task = server_device.spawn(|dev| {
             async move {
-                let endpoint = endpoint_builder(&dev, relay_map2)
-                    .bind()
-                    .await
-                    .context("server endpoint bind")?;
+                let mut builder = endpoint_builder(&dev, relay_map2);
+                if let Some(port) = server_udp_port {
+                    builder = builder
+                        .bind_addr((std::net::Ipv4Addr::UNSPECIFIED, port))
+                        .context("STY old server IPv4 port bind configuration")?;
+                }
+                let endpoint = builder.bind().await.context("server endpoint bind")?;
                 info!(
                     id=%endpoint.id().fmt_short(),
                     bound_sockets=?endpoint.bound_sockets(),
@@ -265,10 +282,13 @@ impl Pair {
         })?;
         let client_task = client_device.spawn(move |dev| {
             async move {
-                let endpoint = endpoint_builder(&dev, self.relay_map)
-                    .bind()
-                    .await
-                    .context("client endpoint bind")?;
+                let mut builder = endpoint_builder(&dev, self.relay_map);
+                if let Some(port) = client_udp_port {
+                    builder = builder
+                        .bind_addr((std::net::Ipv4Addr::UNSPECIFIED, port))
+                        .context("STY old client IPv4 port bind configuration")?;
+                }
+                let endpoint = builder.bind().await.context("client endpoint bind")?;
                 info!(
                     id=%endpoint.id().fmt_short(),
                     bound_sockets=?endpoint.bound_sockets(),
