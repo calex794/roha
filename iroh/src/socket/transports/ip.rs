@@ -530,9 +530,9 @@ impl IpTransports {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     use std::time::Duration;
+
+    use super::*;
 
     #[derive(Default)]
     struct WakeCount(std::sync::atomic::AtomicUsize);
@@ -698,7 +698,6 @@ mod tests {
         assert_eq!(received, 1);
         assert_eq!(&storage[0][..7], b"healthy");
     }
-
 
     #[tokio::test]
     async fn test_bind_sorting() -> n0_error::Result {
