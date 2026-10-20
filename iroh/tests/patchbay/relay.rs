@@ -664,7 +664,12 @@ async fn direct_relay_direct_server_fresh_connection_control() -> Result {
 #[traced_test]
 async fn direct_relay_direct_server_fresh_nodes_control() -> Result {
     let (lab, relay_map, _relay_guard, guard) = lab_with_relay(testdir!()).await?;
-    let initial_id = lab.add_router("initial").nat(Nat::Moderate).build().await?.id();
+    let initial_id = lab
+        .add_router("initial")
+        .nat(Nat::Moderate)
+        .build()
+        .await?
+        .id();
     let blocked_id = lab
         .add_router("blocked")
         .nat(Nat::Moderate)
@@ -672,8 +677,17 @@ async fn direct_relay_direct_server_fresh_nodes_control() -> Result {
         .build()
         .await?
         .id();
-    let peer_id = lab.add_router("peer_net").nat(Nat::Moderate).build().await?.id();
-    let old_server = lab.add_device("old_server").uplink(initial_id).build().await?;
+    let peer_id = lab
+        .add_router("peer_net")
+        .nat(Nat::Moderate)
+        .build()
+        .await?
+        .id();
+    let old_server = lab
+        .add_device("old_server")
+        .uplink(initial_id)
+        .build()
+        .await?;
     let old_client = lab.add_device("old_client").uplink(peer_id).build().await?;
     let (restored_tx, restored_rx) = oneshot::channel::<()>();
     let setup = Duration::from_secs(20);
@@ -683,10 +697,16 @@ async fn direct_relay_direct_server_fresh_nodes_control() -> Result {
     // restore the server's original uplink on the *old* pair.
     Pair::new(relay_map.clone())
         .server(old_server, async move |dev, _ep, conn| {
-            conn.wait_ip(setup).await.context("old server initially direct")?;
-            ping_accept(&conn, setup).await.context("old server initial ping")?;
+            conn.wait_ip(setup)
+                .await
+                .context("old server initially direct")?;
+            ping_accept(&conn, setup)
+                .await
+                .context("old server initial ping")?;
             dev.iface("eth0").unwrap().replug(blocked_id).await?;
-            ping_accept(&conn, recovery).await.context("old server fallback ping")?;
+            ping_accept(&conn, recovery)
+                .await
+                .context("old server fallback ping")?;
             conn.wait_selected(recovery, |p| p.is_relay())
                 .await
                 .context("old server fallback must select relay")?;
@@ -712,9 +732,15 @@ async fn direct_relay_direct_server_fresh_nodes_control() -> Result {
             Ok(())
         })
         .client(old_client, async move |_dev, _ep, conn| {
-            conn.wait_ip(setup).await.context("old client initially direct")?;
-            ping_open(&conn, setup).await.context("old client initial ping")?;
-            ping_open(&conn, recovery).await.context("old client fallback ping")?;
+            conn.wait_ip(setup)
+                .await
+                .context("old client initially direct")?;
+            ping_open(&conn, setup)
+                .await
+                .context("old client initial ping")?;
+            ping_open(&conn, recovery)
+                .await
+                .context("old client fallback ping")?;
             conn.wait_selected(recovery, |p| p.is_relay())
                 .await
                 .context("old client fallback must select relay")?;
@@ -763,7 +789,9 @@ async fn direct_relay_direct_server_fresh_nodes_control() -> Result {
                 "STY fresh NODES server control"
             );
             result.context("fresh nodes server must become direct")?;
-            ping_accept(&conn, recovery).await.context("fresh nodes server ping")?;
+            ping_accept(&conn, recovery)
+                .await
+                .context("fresh nodes server ping")?;
             sty_fixture_accept(&conn, recovery)
                 .await
                 .context("fresh nodes server checked direct bytes")?;
@@ -787,7 +815,9 @@ async fn direct_relay_direct_server_fresh_nodes_control() -> Result {
                 "STY fresh NODES client control"
             );
             result.context("fresh nodes client must become direct")?;
-            ping_open(&conn, recovery).await.context("fresh nodes client ping")?;
+            ping_open(&conn, recovery)
+                .await
+                .context("fresh nodes client ping")?;
             sty_fixture_open(&conn, recovery)
                 .await
                 .context("fresh nodes client checked direct bytes")?;
