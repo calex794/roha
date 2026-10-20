@@ -795,10 +795,7 @@ async fn run_server_replug_new_endpoint_control(reuse_device: bool, reuse_port: 
         .std_context("STY original client UDP port was not recorded")?;
     info!(
         old_server_port,
-        old_client_port,
-        reuse_device,
-        reuse_port,
-        "STY port persistence experiment"
+        old_client_port, reuse_device, reuse_port, "STY port persistence experiment"
     );
 
     // Same topology, but separate the two dimensions: a new Endpoint + UDP
@@ -840,7 +837,10 @@ async fn run_server_replug_new_endpoint_control(reuse_device: bool, reuse_port: 
                     "STY replacement server reused wrong UDP port"
                 );
             }
-            info!(old_server_port, new_ipv4_port, reuse_port, "STY server UDP port comparison");
+            info!(
+                old_server_port,
+                new_ipv4_port, reuse_port, "STY server UDP port comparison"
+            );
             info!(
                 endpoint = %ep.id().fmt_short(),
                 sockets = ?ep.bound_sockets(),
@@ -881,7 +881,10 @@ async fn run_server_replug_new_endpoint_control(reuse_device: bool, reuse_port: 
                     "STY replacement client reused wrong UDP port"
                 );
             }
-            info!(old_client_port, new_ipv4_port, reuse_port, "STY client UDP port comparison");
+            info!(
+                old_client_port,
+                new_ipv4_port, reuse_port, "STY client UDP port comparison"
+            );
             info!(
                 endpoint = %ep.id().fmt_short(),
                 sockets = ?ep.bound_sockets(),
