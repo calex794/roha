@@ -23,6 +23,9 @@ env:
   RUSTFLAGS: -Dwarnings
   RUSTDOCFLAGS: -Dwarnings
   SCCACHE_CACHE_SIZE: "10G"
+  # CI checkouts are ephemeral; disabling incremental compilation lets sccache
+  # cache workspace/path dependencies across runs without changing test coverage.
+  CARGO_INCREMENTAL: "0"
   CRATES_LIST: "iroh,iroh-bench,iroh-dns-server,iroh-relay"
   IROH_FORCE_STAGING_RELAYS: "1"
   NEXTEST_VERSION: "0.9.80"
