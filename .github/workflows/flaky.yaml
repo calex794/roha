@@ -53,7 +53,9 @@ jobs:
       git-ref: ${{ inputs.branch }}
   notify:
     needs: tests
-    if: ${{ always() }}
+    # Ordinary PRs skip the flaky test matrix; do not claim a runner just
+    # to download an empty report and send a no-op notification.
+    if: ${{ always() && needs.tests.result != 'skipped' }}
     runs-on: ubuntu-latest
     steps:
       - name: Extract test results
