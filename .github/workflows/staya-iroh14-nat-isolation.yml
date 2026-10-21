@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   existing-session-nat-matrix:
-    name: Existing QUIC session - NAT flush vs endpoint hint
+    name: Existing QUIC session - NAT & targeted flow controls
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     env:
@@ -53,7 +53,11 @@ jobs:
           set +e
           set -uo pipefail
           failed=0
-          for scenario in             sty_nat_restore_same_connection_flush_only             sty_nat_restore_same_connection_local_network_hint_only             sty_nat_restore_same_connection_flush_and_local_network_hint; do
+          for scenario in \
+            sty_nat_restore_same_connection_flush_only \
+            sty_nat_restore_same_connection_local_network_hint_only \
+            sty_nat_restore_same_connection_flush_and_local_network_hint \
+            sty_nat_restore_same_connection_targeted_old_peer_flow; do
             echo "::group::${scenario}"
             cargo test --locked -p iroh --test patchbay "relay::${scenario}" -- --exact --nocapture --test-threads=1 2>&1 | tee "${RUNNER_TEMP}/${scenario}.log"
             code=${PIPESTATUS[0]}
