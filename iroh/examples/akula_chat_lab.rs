@@ -161,6 +161,7 @@ impl State {
 
 async fn incoming(connection: Connection, state: Arc<State>) -> LabResult<()> {
     let sender = connection.remote_id().to_string();
+    println!("QUIC_INCOMING sender={sender}");
     let (mut tx, mut rx) = connection.accept_bi().await?;
     if !state.trusted.lock().await.contains(&sender) {
         tx.write_all(b"DENIED").await?;
@@ -171,10 +172,14 @@ async fn incoming(connection: Connection, state: Arc<State>) -> LabResult<()> {
     let msg: Message = serde_json::from_slice(&bytes)?;
     let id = msg.id.clone();
     let status = state.persist(sender, msg).await?;
+    println!("QUIC_RECEIPT id={id} status={status}");
     // A final ACK is emitted only AFTER sync_all has succeeded.
     tx.write_all(format!("ACK:{id}:{status}").as_bytes())
         .await?;
     tx.finish()?;
+    // Dropping the final QUIC connection immediately after finish may abort
+    // the peer's read of the durable receipt; wait for the client to close.
+    let _ = timeout(Duration::from_secs(5), connection.closed()).await;
     Ok(())
 }
 
@@ -210,6 +215,7 @@ async fn send(
     .await?;
     tx.finish()?;
     let response = String::from_utf8(timeout(Duration::from_secs(6), rx.read_to_end(256)).await??)?;
+    connection.close(0u32.into(), b"lab-receipt-read");
     if response != format!("ACK:{id}:STORED") && response != format!("ACK:{id}:DUPLICATE") {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, response).into());
     }

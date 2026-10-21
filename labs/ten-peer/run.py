@@ -137,6 +137,8 @@ def main():
         report["status"] = "PASS"
     except Exception as error:
         report["error"] = repr(error)
+        logs = run("logs", "--no-color", "--tail", "80", ok=False)
+        report["container_logs"] = (logs.stdout + logs.stderr)[-18000:]
         raise
     finally:
         out = Path(opts.output)
