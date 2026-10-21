@@ -21,7 +21,7 @@ if [[ "${TARGET_BRANCH}" == "${DEFAULT_BRANCH}" ]]; then
   exit 1
 fi
 case "${TARGET_BRANCH}" in
-  feature/*|fix/*|lab/*|repro/*|experiment/*|integration/*|sync/*|ops/*|test/*|chore/*) ;;
+  ci/*|feature/*|fix/*|lab/*|repro/*|experiment/*|integration/*|sync/*|ops/*|test/*|chore/*) ;;
   *) echo "::error::Not an eligible short-lived branch"; exit 1 ;;
 esac
 case "${MODE}" in
