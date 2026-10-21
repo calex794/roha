@@ -1,0 +1,44 @@
+name: CI Impact Graph (audit only)
+
+on:
+  pull_request:
+    paths:
+      - ".github/scripts/ci_impact_graph.py"
+      - ".github/scripts/test_ci_impact_graph.py"
+      - ".github/workflows/ci-impact-graph.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Validate conservative Cargo and CI impact graph
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # pinned like main CI
+        with:
+          persist-credentials: false
+          fetch-depth: 30
+      - name: Offline unit tests
+        run: python3 -m unittest discover -s .github/scripts -p test_ci_impact_graph.py -v
+      - name: Audit actual workspace (report only)
+        run: |
+          python3 -c "import tomllib; print('Python tomllib available')"
+          python3 .github/scripts/ci_impact_graph.py --repo . --history 30 --top 20 --changed Cargo.lock > "$RUNNER_TEMP/ci-impact-report.json"
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import os
+          data = json.loads((Path(os.environ["RUNNER_TEMP"]) / "ci-impact-report.json").read_text())
+          assert len(data["workspace_members"]) == 6, data["workspace_members"]
+          assert data["selected_files"]["Cargo.lock"]["requires_full_gate"]
+          assert data["files_mapped"] > 40
+          print("Workspace members:", data["workspace_members"])
+          print("Mapped Rust files:", data["files_mapped"])
+          print("PR workflows:", len(data["workflows"]))
+          for source in data["top_files"][:6]:
+              print(source["file"], source["lines"], source["crate"], source["affected"])
+          PY
