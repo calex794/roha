@@ -44,9 +44,22 @@ enum Command {
         id: String,
         text: String,
     },
-    RelaySend { host: String, key: String, recipient: String, id: String, text: String },
-    Forward { host: String, key: String, id: String },
-    Pull { host: String, key: String },
+    RelaySend {
+        host: String,
+        key: String,
+        recipient: String,
+        id: String,
+        text: String,
+    },
+    Forward {
+        host: String,
+        key: String,
+        id: String,
+    },
+    Pull {
+        host: String,
+        key: String,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -77,7 +90,6 @@ enum Packet {
     Store { envelope: Envelope },
     Pull,
 }
-
 
 struct State {
     trusted: Mutex<HashSet<String>>,
@@ -165,7 +177,10 @@ impl State {
         let _: EndpointId = env.recipient.parse()?;
         let signature: [u8; 64] = env.signature.as_slice().try_into()?;
         let tbs = serde_json::to_vec(&(&env.sender, &env.recipient, &env.id, &env.text))?;
-        if sender.verify(&tbs, &iroh::Signature::from_bytes(&signature)).is_err() {
+        if sender
+            .verify(&tbs, &iroh::Signature::from_bytes(&signature))
+            .is_err()
+        {
             return Ok("BAD_SIGNATURE".into());
         }
         let mut mailbox = self.mailbox.lock().await;
@@ -235,9 +250,12 @@ async fn incoming(connection: Connection, state: Arc<State>) -> LabResult<()> {
         }
         Packet::Pull => {
             let mailbox = state.mailbox.lock().await;
-            let mut mine: Vec<Envelope> = mailbox.values()
-                .filter(|e| e.recipient == sender).cloned().collect();
-            mine.sort_by(|a,b| a.id.cmp(&b.id));
+            let mut mine: Vec<Envelope> = mailbox
+                .values()
+                .filter(|e| e.recipient == sender)
+                .cloned()
+                .collect();
+            mine.sort_by(|a, b| a.id.cmp(&b.id));
             serde_json::to_string(&mine)?
         }
     };
@@ -254,13 +272,17 @@ async fn rpc(endpoint: &Endpoint, host: String, key: String, packet: Packet) -> 
         return Err("invalid hostname".into());
     }
     let peer: EndpointId = key.parse()?;
-    let ip = (host.as_str(), PORT).to_socket_addrs()?.next().ok_or("missing peer")?;
+    let ip = (host.as_str(), PORT)
+        .to_socket_addrs()?
+        .next()
+        .ok_or("missing peer")?;
     let target = EndpointAddr::from_parts(peer, [TransportAddr::Ip(ip)]);
     let conn = timeout(Duration::from_secs(6), endpoint.connect(target, ALPN)).await??;
     let (mut tx, mut rx) = conn.open_bi().await?;
     tx.write_all(&serde_json::to_vec(&packet)?).await?;
     tx.finish()?;
-    let reply = String::from_utf8(timeout(Duration::from_secs(6), rx.read_to_end(MAX_FRAME)).await??)?;
+    let reply =
+        String::from_utf8(timeout(Duration::from_secs(6), rx.read_to_end(MAX_FRAME)).await??)?;
     conn.close(0u32.into(), b"done");
     Ok(reply)
 }
@@ -310,16 +332,31 @@ async fn command(command: Command, endpoint: &Endpoint, state: &State) -> LabRes
         Command::Count => Ok(state.seen.lock().await.len().to_string()),
         Command::Allow { key } => state.allow(key).await,
         Command::Send {
-            host, key, id, text,
+            host,
+            key,
+            id,
+            text,
         } => send(endpoint, host, key, id, text).await,
-        Command::RelaySend { host, key, recipient, id, text } => {
+        Command::RelaySend {
+            host,
+            key,
+            recipient,
+            id,
+            text,
+        } => {
             let sender = endpoint.id().to_string();
             let _: EndpointId = recipient.parse()?;
             let data = serde_json::to_vec(&(&sender, &recipient, &id, &text))?;
             let signature = endpoint.secret_key().sign(&data).to_bytes().to_vec();
-            let packet = Packet::Store { envelope: Envelope {
-                sender, recipient, id: id.clone(), text, signature,
-            }};
+            let packet = Packet::Store {
+                envelope: Envelope {
+                    sender,
+                    recipient,
+                    id: id.clone(),
+                    text,
+                    signature,
+                },
+            };
             let reply = rpc(endpoint, host, key, packet).await?;
             if reply != format!("ACK:{id}:STORED") && reply != format!("ACK:{id}:DUPLICATE") {
                 return Err(format!("store refused: {reply}").into());
@@ -327,7 +364,13 @@ async fn command(command: Command, endpoint: &Endpoint, state: &State) -> LabRes
             Ok(reply)
         }
         Command::Forward { host, key, id } => {
-            let env = state.mailbox.lock().await.get(&id).cloned().ok_or("message absent")?;
+            let env = state
+                .mailbox
+                .lock()
+                .await
+                .get(&id)
+                .cloned()
+                .ok_or("message absent")?;
             let reply = rpc(endpoint, host, key, Packet::Store { envelope: env }).await?;
             if reply != format!("ACK:{id}:STORED") && reply != format!("ACK:{id}:DUPLICATE") {
                 return Err(format!("forward refused: {reply}").into());
@@ -339,13 +382,25 @@ async fn command(command: Command, endpoint: &Endpoint, state: &State) -> LabRes
             let messages: Vec<Envelope> = serde_json::from_str(&reply)?;
             let mut accepted = 0usize;
             for env in messages {
-                if env.recipient != endpoint.id().to_string() { return Err("wrong recipient".into()); }
+                if env.recipient != endpoint.id().to_string() {
+                    return Err("wrong recipient".into());
+                }
                 let source: EndpointId = env.sender.parse()?;
-                let sig: [u8;64] = env.signature.as_slice().try_into()?;
+                let sig: [u8; 64] = env.signature.as_slice().try_into()?;
                 let data = serde_json::to_vec(&(&env.sender, &env.recipient, &env.id, &env.text))?;
                 source.verify(&data, &iroh::Signature::from_bytes(&sig))?;
-                let status = state.persist(env.sender, Message { id: env.id, text: env.text }).await?;
-                if status == "STORED" { accepted += 1; }
+                let status = state
+                    .persist(
+                        env.sender,
+                        Message {
+                            id: env.id,
+                            text: env.text,
+                        },
+                    )
+                    .await?;
+                if status == "STORED" {
+                    accepted += 1;
+                }
                 if status != "STORED" && status != "DUPLICATE" {
                     return Err("recipient conflicts with envelope".into());
                 }
