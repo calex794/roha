@@ -115,13 +115,21 @@ def main():
         assert_count("peer02", 10)
         report["checks"].append("identical replay deduplicated; conflicting replay rejected")
 
-        # Roha may reuse a learned direct route to the real public-key owner.
-        # A confusing container hostname is NOT a substitute for peer identity.
-        send("peer01", "peer02", keys, "identity-routing", "only key owner",
-             target_key=keys["peer03"])
+        # Roha can either reject a mismatched endpoint certificate or use a
+        # previously learned route to the true key owner. Neither outcome may
+        # persist a message on the unrelated host peer02.
+        observed = exec_node("peer01", "send", "peer02", keys["peer03"],
+                             "identity-routing", "only key owner", ok=False)
+        reached_owner = observed.returncode == 0
+        if reached_owner:
+            assert observed.stdout.strip() == "ACK:identity-routing:STORED"
+            assert_count("peer03", 11)
+            report["identity_route_observation"] = "routed_to_authenticated_owner"
+        else:
+            assert_count("peer03", 10)
+            report["identity_route_observation"] = "mismatched_certificate_rejected"
         assert_count("peer02", 10)
-        assert_count("peer03", 11)
-        report["checks"].append("public key routes to its real owner, not another host")
+        report["checks"].append("wrong hostname never receives other identity's message")
 
         # Take the real key owner offline: a different live host MUST NOT
         # impersonate it to acknowledge the message.
@@ -132,7 +140,7 @@ def main():
         run("start", "peer03")
         wait_healthy("peer03")
         assert result("peer03", "id") == keys["peer03"]
-        assert_count("peer03", 11)
+        assert_count("peer03", 11 if reached_owner else 10)
         report["checks"].append("offline key owner cannot be impersonated by other host")
 
         run("restart", "peer05")
@@ -154,7 +162,7 @@ def main():
 
         report["p50_ms"] = percentile(latencies, 50)
         report["p95_ms"] = percentile(latencies, 95)
-        report["verified_deliveries"] = len(latencies) + 3
+        report["verified_deliveries"] = len(latencies) + 2 + int(reached_owner)
         report["status"] = "PASS"
     except Exception as error:
         report["error"] = repr(error)

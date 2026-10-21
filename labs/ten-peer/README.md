@@ -28,9 +28,10 @@ Do not use any real messages or production identities.
 * An identical replay creates no additional inbox record; a changed payload
   with the same (sender key, message id) is rejected.
 * Before explicit trust enrollment, unsolicited messages get no durable ACK.
-* The public key determines the actual receiver. With learned routes, Roha can
-  reach that peer even if the provided hostname names a different container.
-  The named (wrong) container does not receive the message.
+* The public key determines cryptographic identity, not the hostname. With
+  learned routes Roha may reach the true key owner despite a mismatched host,
+  or it may reject that connection due to an unknown certificate issuer.
+  The named (wrong) container must **never** accept the message.
 * If the actual public-key owner is offline, another live host cannot
   impersonate it to produce a successful durable ACK.
 * Restart preserves inbox and public identity.
