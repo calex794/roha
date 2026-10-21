@@ -590,6 +590,12 @@ impl StyE02Trace {
         }
         let pcap = self.directory.join("tcpdump_pcap.pcap");
         let pcap_bytes = std::fs::metadata(&pcap)?.len();
+        let nft_bytes = std::fs::metadata(self.directory.join("nft_trace.stdout"))?.len();
+        let text_bytes = std::fs::metadata(self.directory.join("tcpdump_text.stdout"))?.len();
+        ensure_any!(
+            nft_bytes > 0 && text_bytes > 0 && pcap_bytes > 24,
+            "E02 incomplete capture: nft={nft_bytes} text={text_bytes} pcap={pcap_bytes}; do not accept the packet-trace experiment"
+        );
         info!(
             directory = %self.directory.display(),
             pcap_bytes,
@@ -647,7 +653,7 @@ fn sty_e02_start_trace(
         (
             "tcpdump_text",
             "tcpdump",
-            &["-i", "any", "-nn", "-tt", "-l", "-s", "160", "udp"],
+            &["-Z", "root", "-i", "any", "-nn", "-tt", "-l", "-s", "160", "udp"],
         ),
         ("tcpdump_pcap", "tcpdump", &[]),
     ];
@@ -657,7 +663,7 @@ fn sty_e02_start_trace(
         let mut command = std::process::Command::new(program);
         if label == "tcpdump_pcap" {
             let pcap = directory.join("tcpdump_pcap.pcap");
-            command.args(["-i", "any", "-nn", "-U", "-s", "160", "-w"]);
+            command.args(["-Z", "root", "-i", "any", "-nn", "-U", "-s", "160", "-w"]);
             command.arg(pcap).arg("udp");
         } else {
             command.args(args);
