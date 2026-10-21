@@ -411,6 +411,8 @@ async fn run_direct_relay_direct(
     probe_after_replug: bool,
     notify_peer: bool,
     fresh_connection_control: bool,
+    flush_nat_after_restore: bool,
+    notify_replugged_local: bool,
 ) -> Result {
     let (lab, relay_map, _relay_guard, guard) = lab_with_relay(testdir!()).await?;
     let initial = lab.add_router("initial").nat(Nat::Moderate).build().await?;
@@ -465,6 +467,21 @@ async fn run_direct_relay_direct(
                 .context("STY relay: byte-for-byte payload")?;
 
             dev.iface("eth0").unwrap().replug(initial.id()).await?;
+            if flush_nat_after_restore {
+                // An isolation control on Patchbay's simulated router, not a
+                // production recommendation to erase customer conntrack state.
+                initial
+                    .flush_nat_state()
+                    .await
+                    .context("STY same-connection: flush restored simulated NAT state")?;
+                info!("STY_SAME_CONNECTION_NAT_FLUSH");
+            }
+            if notify_replugged_local {
+                // Separate detection/refresh from stale NAT state.  This hint
+                // is sent to the endpoint whose network actually changed.
+                ep.network_change().await;
+                info!("STY_SAME_CONNECTION_LOCAL_NETWORK_HINT");
+            }
             info!(advertised = ?ep.addr(), "STY address immediately after restoring network");
             if notify_peer {
                 let _ = restored_tx.send(());
@@ -624,31 +641,52 @@ async fn run_direct_relay_direct(
 #[tokio::test]
 #[traced_test]
 async fn direct_relay_direct_client_replug() -> Result {
-    run_direct_relay_direct(Side::Client, false, false, false).await
+    run_direct_relay_direct(Side::Client, false, false, false, false, false).await
 }
 
 #[tokio::test]
 #[traced_test]
 async fn direct_relay_direct_server_replug() -> Result {
-    run_direct_relay_direct(Side::Server, false, false, false).await
+    run_direct_relay_direct(Side::Server, false, false, false, false, false).await
 }
 
 #[tokio::test]
 #[traced_test]
 async fn direct_relay_direct_server_with_traffic_probe() -> Result {
-    run_direct_relay_direct(Side::Server, true, false, false).await
+    run_direct_relay_direct(Side::Server, true, false, false, false, false).await
 }
 
 #[tokio::test]
 #[traced_test]
 async fn direct_relay_direct_server_with_peer_network_hint() -> Result {
-    run_direct_relay_direct(Side::Server, false, true, false).await
+    run_direct_relay_direct(Side::Server, false, true, false, false, false).await
 }
 
 #[tokio::test]
 #[traced_test]
 async fn direct_relay_direct_server_fresh_connection_control() -> Result {
-    run_direct_relay_direct(Side::Server, false, false, true).await
+    run_direct_relay_direct(Side::Server, false, false, true, false, false).await
+}
+
+// Separate from the nine historical A/B scenarios, which all retain their
+// original call parameters.  These controls ask whether the EXISTING QUIC
+// connection can regain direct routing without recreating an Endpoint/socket.
+#[tokio::test]
+#[traced_test]
+async fn sty_nat_restore_same_connection_flush_only() -> Result {
+    run_direct_relay_direct(Side::Server, false, false, false, true, false).await
+}
+
+#[tokio::test]
+#[traced_test]
+async fn sty_nat_restore_same_connection_local_network_hint_only() -> Result {
+    run_direct_relay_direct(Side::Server, false, false, false, false, true).await
+}
+
+#[tokio::test]
+#[traced_test]
+async fn sty_nat_restore_same_connection_flush_and_local_network_hint() -> Result {
+    run_direct_relay_direct(Side::Server, false, false, false, true, true).await
 }
 
 /// STY-RN-5 isolation control: after the *server* moves through an UDP-blocked
