@@ -112,7 +112,19 @@ jobs:
             echo "Open stacked PR depends on this branch; skip"
             exit 0
           fi
-          if [[ "$(jq -r '.auto_merge != null' <<< "$pr")" == true ]]; then
+          # Guard against HEAD/base/draft changes between list and enrollment.
+          live="$(gh api "repos/$REPO/pulls/$number")"
+          if [[ "$(jq -r '.head.sha' <<< "$live")" != "$RUN_SHA" ]] ||
+             [[ "$(jq -r '.base.ref' <<< "$live")" != main ]] ||
+             [[ "$(jq -r '.draft' <<< "$live")" != false ]]; then
+            echo "PR changed since the CI run; refuse enrollment"
+            exit 0
+          fi
+          if [[ "$(jq -r '.mergeable' <<< "$live")" == false ]]; then
+            echo "PR has a merge conflict; cannot enroll"
+            exit 0
+          fi
+          if [[ "$(jq -r '.auto_merge != null' <<< "$live")" == true ]]; then
             echo "GitHub native auto-merge is already armed for PR #$number"
             exit 0
           fi
