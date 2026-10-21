@@ -58,7 +58,9 @@ jobs:
             sty_e03_raw_udp_replug_stale_state \
             sty_e03_raw_udp_replug_targeted_delete \
             sty_e03b_raw_udp_burst_stale \
-            sty_e03b_raw_udp_burst_targeted_delete; do
+            sty_e03b_raw_udp_burst_targeted_delete \
+            sty_e03c_raw_udp_only_old_peer_sequential \
+            sty_e03c_raw_udp_only_old_peer_burst; do
             echo "::group::${scenario}"
             log="${RUNNER_TEMP}/${scenario}.log"
             cargo test --locked -p iroh --test patchbay "raw_udp_nat::${scenario}" -- --exact --nocapture --test-threads=1 > "${log}" 2>&1
