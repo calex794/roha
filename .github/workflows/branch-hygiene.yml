@@ -1,0 +1,150 @@
+# Conservative branch cleanup for repos with stacked experimental PRs.
+# Never deletes an unmerged branch. Weekly/manual inventory is read-only.
+name: Branch hygiene
+on:
+  pull_request:
+    types: [closed]
+  workflow_dispatch:
+  schedule:
+    - cron: '23 7 * * 1'
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: branch-hygiene-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  prune-merged-internal-head:
+    name: Delete merged main-PR head (guarded)
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.base.ref == github.event.repository.default_branch &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - name: Check exact head, protected status, and stacked PRs before deletion
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [[ "${BRANCH}" == "${DEFAULT_BRANCH}" ]]; then
+            echo "Skip default branch"
+            exit 0
+          fi
+          # Only short-lived internal work branches. Keep upstream and release refs.
+          case "${BRANCH}" in
+            fix/*|feature/*|lab/*|repro/*|experiment/*|integration/*|sync/*|ops/*|test/*|chore/*) ;;
+            *) echo "Skip non-ephemeral branch: ${BRANCH}"; exit 0 ;;
+          esac
+          actual_sha="$(gh api "repos/${REPO}/git/ref/heads/${BRANCH}" --jq '.object.sha' 2>/dev/null || true)"
+          if [[ -z "${actual_sha}" ]]; then
+            echo "Already deleted (native GitHub automatic deletion may be enabled)"
+            exit 0
+          fi
+          if [[ "${actual_sha}" != "${EXPECTED_SHA}" ]]; then
+            echo "Skip: branch moved after pull request merge"
+            exit 0
+          fi
+          protected="$(gh api "repos/${REPO}/branches/${BRANCH}" --jq '.protected' 2>/dev/null || echo true)"
+          if [[ "${protected}" != "false" ]]; then
+            echo "Skip protected or unverified branch"
+            exit 0
+          fi
+          # A stacked PR can target this branch even after its own PR was merged.
+          refs="$(gh api --paginate "repos/${REPO}/pulls?state=open&per_page=100" --jq '.[] | [.base.ref, .head.ref, (.head.repo.full_name // "")] | @tsv')"
+          while IFS=$'\t' read -r base head head_repo; do
+            if [[ "${base}" == "${BRANCH}" ]] || \
+               { [[ "${head}" == "${BRANCH}" ]] && [[ "${head_repo}" == "${REPO}" ]]; }; then
+              echo "Skip: open PR still references ${BRANCH}"
+              exit 0
+            fi
+          done <<< "${refs}"
+
+          # Git push with an exact lease prevents deleting a branch that moved
+          # after the last API read. No checkout or execution of PR code.
+          gh auth setup-git
+          cd "$(mktemp -d)"
+          git init -q
+          git remote add origin "https://github.com/${REPO}.git"
+          git push --porcelain \
+            --force-with-lease="refs/heads/${BRANCH}:${EXPECTED_SHA}" \
+            origin ":refs/heads/${BRANCH}"
+          echo "Deleted merged internal head ${BRANCH} at ${EXPECTED_SHA}"
+
+  report-unreferenced-branches:
+    name: Report branch inventory (no deletion)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Review branches with no open PR
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          mapfile -t rows < <(gh api --paginate "repos/${REPO}/branches?per_page=100" \
+            --jq '.[] | [.name, .commit.sha, (.protected|tostring)] | @tsv')
+          refs="$(gh api --paginate "repos/${REPO}/pulls?state=open&per_page=100" \
+            --jq '.[] | [.base.ref, .head.ref, (.head.repo.full_name // "")] | @tsv')"
+          now="$(date -u +%s)"
+          stale=0
+          {
+            echo "## Branch inventory: ${REPO}"
+            echo ""
+            echo "Tip commit age is an indicator only; this job NEVER deletes these candidates."
+            echo ""
+            echo "| Branch with no open PR | Tip commit age (days) | Tip SHA |"
+            echo "|---|---:|---|"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          for row in "${rows[@]}"; do
+            IFS=$'\t' read -r branch sha protected <<< "${row}"
+            if [[ "${branch}" == "${DEFAULT_BRANCH}" ]] || \
+               [[ "${protected}" != "false" ]] || \
+               [[ "${branch}" == "generated-docs-preview" ]] || \
+               [[ "${branch}" == "gh-pages" ]]; then
+              continue
+            fi
+            case "${branch}" in
+              release/*|upstream/*) continue ;;
+            esac
+            linked=false
+            while IFS=$'\t' read -r base head head_repo; do
+              if [[ "${base}" == "${branch}" ]] || \
+                 { [[ "${head}" == "${branch}" ]] && [[ "${head_repo}" == "${REPO}" ]]; }; then
+                linked=true
+                break
+              fi
+            done <<< "${refs}"
+            if [[ "${linked}" == true ]]; then
+              continue
+            fi
+            committed="$(gh api "repos/${REPO}/commits/${sha}" --jq '.commit.committer.date' 2>/dev/null || true)"
+            [[ -z "${committed}" ]] && continue
+            commit_ts="$(date -u -d "${committed}" +%s)"
+            age="$(( (now - commit_ts) / 86400 ))"
+            if (( age >= 14 )); then
+              printf '| %s | %s | %s |\n' "${branch}" "${age}" "${sha:0:12}" >> "${GITHUB_STEP_SUMMARY}"
+              stale="$((stale + 1))"
+            fi
+          done
+          if (( stale == 0 )); then
+            echo "| No branches older than 14 days without an open PR | - | - |" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+          echo "" >> "${GITHUB_STEP_SUMMARY}"
+          echo "Manual triage is required before deleting any unmerged branch. Open PR bases are retained." >> "${GITHUB_STEP_SUMMARY}"
