@@ -208,7 +208,9 @@ async fn run_e03(case: E03Case) -> Result<()> {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (rx_tx, mut rx_rx) = mpsc::unbounded_channel();
     let (port_tx, port_rx) = oneshot::channel();
-    let sender_task = device.spawn(async move |_| raw_udp_sender(port_tx, cmd_rx, rx_tx))?;
+    let sender_task = device.spawn(async move |_| {
+        raw_udp_sender(port_tx, cmd_rx, rx_tx).await
+    })?;
     let local_port = tokio::time::timeout(E03_TIMEOUT, port_rx)
         .await
         .map_err(|_| anyerr!("E03 UDP sender startup timeout"))?
