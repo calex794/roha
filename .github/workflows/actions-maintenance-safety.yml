@@ -1,0 +1,34 @@
+# Unprivileged regression tests. PR code never receives a write token.
+name: Actions maintenance safety
+on:
+  pull_request:
+    paths:
+      - '.github/scripts/prune-stale-actions.py'
+      - '.github/scripts/archive-orphan.sh'
+      - '.github/scripts/tests/test_prune_stale_actions.py'
+      - '.github/workflows/actions-maintenance-safety.yml'
+      - '.github/workflows/archive-verified-legacy-branches.yml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/scripts/prune-stale-actions.py'
+      - '.github/scripts/archive-orphan.sh'
+      - '.github/scripts/tests/test_prune_stale_actions.py'
+      - '.github/workflows/actions-maintenance-safety.yml'
+      - '.github/workflows/archive-verified-legacy-branches.yml'
+permissions:
+  contents: read
+jobs:
+  regression:
+    name: Preserve ref-maintenance; prune only stale CI
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout without persistent credentials
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Test cancellation decisions and recheck
+        run: python3 -m unittest discover -s .github/scripts/tests -p 'test_prune_stale_actions.py' -v
+      - name: Verify archival helper shell syntax
+        run: bash -n .github/scripts/archive-orphan.sh
