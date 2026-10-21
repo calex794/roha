@@ -29,6 +29,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Test the PR branch HEAD, not GitHub's synthetic PR merge ref.
+          # The parent integration branch can receive unrelated Cargo.lock fixes.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0 # ancestry check requires upstream v1.4 commit object
 
       - name: Install Rust
@@ -65,7 +68,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: staya-iroh14-path-${{ github.sha }}
+          name: staya-iroh14-path-${{ github.event.pull_request.head.sha || github.sha }}
           path: |
             ${{ runner.temp }}/staya-path-smoke.log
             target/testdir-current/
