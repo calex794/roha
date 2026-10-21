@@ -1,0 +1,72 @@
+name: Staya Roha 1.4 path regression
+
+on:
+  pull_request:
+    paths:
+      - "iroh/tests/patchbay/relay.rs"
+      - "iroh/tests/patchbay/util.rs"
+      - ".github/workflows/staya-iroh14-path-regression.yml"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staya-iroh14-path-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  direct-relay-direct:
+    name: Iroh 1.4 direct-relay-direct A/B baseline
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      RUST_BACKTRACE: "1"
+      RUST_LOG: "info,iroh::socket=debug,iroh::socket::remote_map::remote_state=trace,iroh::_events::qnt=debug,noq_proto::n0_nat_traversal=trace,staya_p2p_udp=trace"
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+
+      - name: Verify upstream Iroh v1.4 and test-only scope
+        run: |
+          git merge-base --is-ancestor 55908a5809b61c72ec8deeff024038f4a9d68ab7 HEAD
+          git diff --exit-code 55908a5809b61c72ec8deeff024038f4a9d68ab7 HEAD -- Cargo.lock iroh/src
+          git diff --name-only 55908a5809b61c72ec8deeff024038f4a9d68ab7 HEAD
+
+      - name: Install NAT inspection tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y conntrack
+          command -v conntrack
+
+      - name: Check unprivileged network namespaces
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          unshare --user --map-root-user true
+
+      - name: Run all nine original Roha #13 path scenarios
+        run: |
+          set -o pipefail
+          cargo test --locked -p iroh --test patchbay direct_relay_direct_ -- --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/staya-path-smoke.log"
+
+      - name: Check Cargo.lock is unchanged
+        run: git diff --exit-code Cargo.lock
+
+      - name: Preserve diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: staya-iroh14-path-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/staya-path-smoke.log
+            target/testdir-current/
+          retention-days: 7
+          if-no-files-found: ignore
