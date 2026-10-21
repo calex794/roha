@@ -639,13 +639,17 @@ fn sty_e02_start_trace(
     let mut children = Vec::new();
     let observers: [(&str, &str, &[&str]); 4] = [
         ("nft_trace", "nft", &["monitor", "trace"]),
-        ("conntrack_events", "conntrack", &["-E", "-p", "udp", "-o", "timestamp"]),
-        ("tcpdump_text", "tcpdump", &["-i", "any", "-nn", "-tt", "-l", "-s", "160", "udp"]),
         (
-            "tcpdump_pcap",
-            "tcpdump",
-            &["-i", "any", "-nn", "-U", "-s", "160", "-w", "PLACEHOLDER", "udp"],
+            "conntrack_events",
+            "conntrack",
+            &["-E", "-p", "udp", "-o", "timestamp"],
         ),
+        (
+            "tcpdump_text",
+            "tcpdump",
+            &["-i", "any", "-nn", "-tt", "-l", "-s", "160", "udp"],
+        ),
+        ("tcpdump_pcap", "tcpdump", &[]),
     ];
     for (label, program, args) in observers {
         let out = directory.join(format!("{label}.stdout"));
