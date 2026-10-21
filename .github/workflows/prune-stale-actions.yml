@@ -1,0 +1,34 @@
+# Default-branch-only cleanup: never checkout PR heads or untrusted refs with write rights.
+name: Stale Actions queue cleanup
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '7,37 * * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: actions-queue-cleanup-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  cancel-stale-runs:
+    name: Cancel obsolete queued runs (preserve active CI)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted main only
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Cancel stale work and stranded optional self-hosted jobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/prune-stale-actions.py
