@@ -27,7 +27,12 @@ Do not use any real messages or production identities.
 * 10 ring + 90 all-to-all messages, authenticated end-to-end transport.
 * An identical replay creates no additional inbox record; a changed payload
   with the same (sender key, message id) is rejected.
-* A wrong target public key cannot result in an end-recipient delivery ACK.
+* Before explicit trust enrollment, unsolicited messages get no durable ACK.
+* The public key determines the actual receiver. With learned routes, Roha can
+  reach that peer even if the provided hostname names a different container.
+  The named (wrong) container does not receive the message.
+* If the actual public-key owner is offline, another live host cannot
+  impersonate it to produce a successful durable ACK.
 * Restart preserves inbox and public identity.
 * An offline recipient is **not** silently marked delivered; a **manual**
   resend after restart delivers once.

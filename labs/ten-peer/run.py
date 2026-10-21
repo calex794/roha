@@ -82,6 +82,12 @@ def main():
         assert len(set(keys.values())) == 10
         report["checks"].append("10 independent identities")
 
+        # No message may be accepted before the identities are explicitly enrolled.
+        send("peer01", "peer02", keys, "not-enrolled", "must fail",
+             expect_ok=False)
+        assert_count("peer02", 0)
+        report["checks"].append("untrusted sender receives no durable ACK")
+
         # Explicit bootstrap simulates trusted in-person invitations.
         for node in NODES:
             for other in NODES:
@@ -109,10 +115,25 @@ def main():
         assert_count("peer02", 10)
         report["checks"].append("identical replay deduplicated; conflicting replay rejected")
 
+        # Roha may reuse a learned direct route to the real public-key owner.
+        # A confusing container hostname is NOT a substitute for peer identity.
+        send("peer01", "peer02", keys, "identity-routing", "only key owner",
+             target_key=keys["peer03"])
+        assert_count("peer02", 10)
+        assert_count("peer03", 11)
+        report["checks"].append("public key routes to its real owner, not another host")
+
+        # Take the real key owner offline: a different live host MUST NOT
+        # impersonate it to acknowledge the message.
+        run("stop", "peer03")
         send("peer01", "peer02", keys, "fake-key", "must fail",
              target_key=keys["peer03"], expect_ok=False)
         assert_count("peer02", 10)
-        report["checks"].append("wrong endpoint key did not yield a delivery ACK")
+        run("start", "peer03")
+        wait_healthy("peer03")
+        assert result("peer03", "id") == keys["peer03"]
+        assert_count("peer03", 11)
+        report["checks"].append("offline key owner cannot be impersonated by other host")
 
         run("restart", "peer05")
         wait_healthy("peer05")
@@ -133,7 +154,7 @@ def main():
 
         report["p50_ms"] = percentile(latencies, 50)
         report["p95_ms"] = percentile(latencies, 95)
-        report["verified_deliveries"] = len(latencies) + 2
+        report["verified_deliveries"] = len(latencies) + 3
         report["status"] = "PASS"
     except Exception as error:
         report["error"] = repr(error)
