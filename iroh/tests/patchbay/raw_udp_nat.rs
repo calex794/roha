@@ -286,8 +286,7 @@ async fn run_e03(case: E03Case) -> Result<()> {
     ) {
         burst_observed(&cmd_tx, &mut event_rx, discovery_addr, peer_addr).await?
     } else {
-        let discovery =
-            observed(&cmd_tx, &mut event_rx, discovery_addr, "AFTER_DISCOVERY").await?;
+        let discovery = observed(&cmd_tx, &mut event_rx, discovery_addr, "AFTER_DISCOVERY").await?;
         let peer = observed(&cmd_tx, &mut event_rx, peer_addr, "AFTER_PEER").await?;
         (discovery, peer)
     };
@@ -343,9 +342,7 @@ async fn run_e03(case: E03Case) -> Result<()> {
     // a required PASS: mapping equality vs divergence is the actual result.
     if matches!(
         case,
-        E03Case::NoReplug
-            | E03Case::ReplugDeleteOldPeer
-            | E03Case::ReplugBurstDeleteOldPeer
+        E03Case::NoReplug | E03Case::ReplugDeleteOldPeer | E03Case::ReplugBurstDeleteOldPeer
     ) {
         ensure_any!(
             received_peer,
