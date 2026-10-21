@@ -1,0 +1,94 @@
+name: Staya Roha E00 reproducibility
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/staya-iroh14-e00-repro.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staya-roha-e00-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repeated-causal-controls:
+    name: E00 repeat E01 A/B on new ephemeral ports
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      RUST_BACKTRACE: "1"
+      RUST_LOG: info
+    steps:
+      - name: Checkout exact PR HEAD
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+      - name: Verify exact pinned transport boundary
+        run: |
+          git merge-base --is-ancestor 55908a5809b61c72ec8deeff024038f4a9d68ab7 HEAD
+          git diff --exit-code 55908a5809b61c72ec8deeff024038f4a9d68ab7 HEAD -- Cargo.lock iroh/src
+      - name: Install isolated NAT tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y conntrack
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          unshare --user --map-root-user true
+      - name: Run three independent repetitions per control
+        shell: bash
+        run: |
+          set +e
+          set -uo pipefail
+          failed=0
+          : > "${RUNNER_TEMP}/e00-results.txt"
+          for trial in 1 2 3; do
+            for spec in \
+              "sty_nat_restore_same_connection_targeted_old_peer_flow:PASS" \
+              "sty_nat_restore_same_connection_noop_control:RED" \
+              "sty_nat_restore_same_connection_unrelated_dns_deletion:RED"; do
+              scenario=${spec%:*}
+              expected=${spec#*:}
+              log="${RUNNER_TEMP}/e00-${scenario}-trial-${trial}.log"
+              cargo test --locked -p iroh --test patchbay "relay::${scenario}" -- --exact --nocapture --test-threads=1 > "${log}" 2>&1
+              code=$?
+              accepted=0
+              if [ "${expected}" = PASS ]; then
+                if [ "${code}" -eq 0 ] &&
+                   grep -q 'test result: ok. 1 passed' "${log}" &&
+                   grep -q 'STY_E01_EXACT_OLD_FLOW_DELETE' "${log}" &&
+                   grep -q 'STY_PATH_DIRECT_RECOVERED' "${log}"; then accepted=1; fi
+              else
+                if [ "${code}" -eq 101 ] &&
+                   grep -q 'test result: FAILED. 0 passed; 1 failed' "${log}" &&
+                   grep -q 'STY_PATH_RELAY_SELECTED' "${log}" &&
+                   ! grep -q 'STY_PATH_DIRECT_RECOVERED' "${log}"; then accepted=1; fi
+                if [ "${scenario}" = sty_nat_restore_same_connection_unrelated_dns_deletion ]; then
+                  if ! grep -q 'STY_E01_EXACT_OLD_FLOW_DELETE' "${log}"; then accepted=0; fi
+                fi
+              fi
+              printf 'trial=%s scenario=%s expected=%s exit=%s accepted=%s\n' "${trial}" "${scenario}" "${expected}" "${code}" "${accepted}" | tee -a "${RUNNER_TEMP}/e00-results.txt"
+              if [ "${accepted}" -ne 1 ]; then
+                failed=1
+                tail -n 100 "${log}"
+              fi
+            done
+          done
+          exit "${failed}"
+      - name: Preserve all repetitions
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: staya-roha-e00-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            ${{ runner.temp }}/e00-*.log
+            ${{ runner.temp }}/e00-results.txt
+          if-no-files-found: ignore
+          retention-days: 7
