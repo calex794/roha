@@ -72,7 +72,9 @@ class RefMaintenanceSafetyTests(unittest.TestCase):
 
     def test_open_pr_orphan_ci_still_runs(self):
         run = make_run(17, ".github/workflows/ci.yml")
-        self.assertIsNone(pruner.choose_reason(run, {"closed-sha"}, "main-sha", "main"))
+        with mock.patch.object(pruner, "only_unavailable_self_hosted_jobs", return_value=False) as check:
+            self.assertIsNone(pruner.choose_reason(run, {"closed-sha"}, "main-sha", "main"))
+        check.assert_called_once_with(17)
 
     def test_missing_workflow_path_does_not_trust_display_name(self):
         run = make_run(18, None)
