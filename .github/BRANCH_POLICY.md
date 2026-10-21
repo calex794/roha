@@ -36,3 +36,13 @@ A temporary failure due to lack of self-hosted runner is not a pass; do not bypa
 
 ## Deployment
 This policy and workflow are submitted by PR. They do not change GitHub Settings. The branch-hygiene workflow starts after the PR is merged to main. Admin configuration must be done by a repository administrator.
+
+## Reversible retirement of one experimental branch (after merge)
+1. Check that the branch has no open PR using it as head/base, and confirm the tip SHA.
+2. Open Actions → Branch hygiene → Run workflow on `main`.
+3. Provide `archive_branch` (exact name), `archive_sha` (exact 40-hex tip), and `confirm_archive=ARCHIVE`.
+4. The workflow validates the exact ref, confirms it is unprotected, and verifies no open PR depends on it; then creates and rereads a lightweight tag `archive/<branch>/<12-char-SHA>` before deleting the branch with an exact SHA lease.
+5. On any check failure it stops without deleting the branch. A verified tag survives a failed deletion and permits a retry or recovery.
+6. To recover, create a new branch from the full archived tag SHA. Never force-update or bulk-delete archive tags.
+
+The archive action is an **explicit manual operation**, not an age-based cron sweep. A normal Run workflow with empty inputs only produces the read-only inventory. This is important because most old Roha labs still contain commits absent from main.
