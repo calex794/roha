@@ -23,6 +23,29 @@ NOW = dt.datetime.now(dt.timezone.utc)
 MAX_RUNS = 200
 BLOCKED_MINUTES = 45
 
+# These are the only trusted ref-maintenance workflows whose scheduled action
+# must survive a PR closing or main advancing. Match workflow path + event,
+# never the mutable display name or an arbitrary job supplied by a PR.
+BRANCH_HYGIENE_PATH = ".github/workflows/branch-hygiene.yml"
+LEGACY_ARCHIVE_PATH = ".github/workflows/archive-verified-legacy-branches.yml"
+
+
+def is_ref_maintenance_run(run: dict, default: str) -> bool:
+    path = run.get("path")
+    if not isinstance(path, str):
+        return False
+    # GitHub may append @refs/... to a workflow path.
+    workflow = path.split("@", 1)[0]
+    event = run.get("event")
+    if workflow == BRANCH_HYGIENE_PATH:
+        # branch-hygiene.yml handles only pull_request.closed PR events;
+        # this job may be queued precisely after the PR stops being open.
+        return event == "pull_request"
+    if workflow == LEGACY_ARCHIVE_PATH:
+        # Its one-shot archive is a privileged main-only push workflow.
+        return event == "push" and run.get("head_branch") == default
+    return False
+
 
 def request(path: str, method: str = "GET"):
     url = path if path.startswith("https://") else API + path
@@ -81,6 +104,8 @@ def choose_reason(run: dict, open_sha: set[str], main_sha: str, default: str) ->
     event = run.get("event")
     branch = run.get("head_branch")
     sha = run.get("head_sha")
+    if is_ref_maintenance_run(run, default):
+        return None
     if event == "pull_request":
         if not sha or sha not in open_sha:
             return "PR closed or head SHA superseded"
@@ -131,6 +156,10 @@ def main() -> int:
             skipped += 1
             continue
         if current["head_sha"] != run["head_sha"]:
+            skipped += 1
+            continue
+        # Reapply the protected-maintenance policy against the live run too.
+        if is_ref_maintenance_run(current, default):
             skipped += 1
             continue
         if "stranded" in reason and not only_unavailable_self_hosted_jobs(rid):

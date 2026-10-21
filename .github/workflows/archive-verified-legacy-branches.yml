@@ -1,4 +1,5 @@
-# Single-run historical cleanup. Fires only when this workflow first lands on main.
+# Guarded archive retry: trigger once when the fixed ref-lookup and queue-pruner land in main.
+# Exact SHA, merged-PR proof, keeper ancestry and open-PR guards still apply.
 # Keep a manual re-run option; no experimental branch is deleted without a proof.
 name: Archive verified legacy branches
 on:
