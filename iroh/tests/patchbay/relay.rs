@@ -653,7 +653,9 @@ fn sty_e02_start_trace(
         (
             "tcpdump_text",
             "tcpdump",
-            &["-Z", "root", "-i", "any", "-nn", "-tt", "-l", "-s", "160", "udp"],
+            &[
+                "-Z", "root", "-i", "any", "-nn", "-tt", "-l", "-s", "160", "udp",
+            ],
         ),
         ("tcpdump_pcap", "tcpdump", &[]),
     ];
