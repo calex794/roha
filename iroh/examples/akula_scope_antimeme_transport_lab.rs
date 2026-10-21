@@ -79,22 +79,20 @@ async fn hop(
 }
 
 async fn demonstration() -> Result<()> {
-    // Minimal has no DNS/pkarr lookup and disables relay by default. This
+    // Minimal has no DNS/pkarr lookup; helper binds ONLY loopback. This
     // experiment must never silently fall back to public n0 infrastructure.
-    let a = Endpoint::builder(presets::Minimal).bind().await?;
-    let b = Endpoint::builder(presets::Minimal)
-        .alpns(vec![ALPN.to_vec()])
-        .bind()
-        .await?;
-    let c = Endpoint::builder(presets::Minimal)
-        .alpns(vec![ALPN.to_vec()])
-        .bind()
-        .await?;
+    let a = initiate_from_loopback().await?;
+    let b = accept_on_loopback().await?;
+    let c = accept_on_loopback().await?;
 
     for peer in [&a, &b, &c] {
         ensure_any!(
             peer.addr().relay_urls().next().is_none(),
             "direct-only experiment unexpectedly offered a relay"
+        );
+        ensure_any!(
+            peer.addr().ip_addrs().all(|ip| ip.ip().is_loopback()),
+            "lab socket escaped the local loopback interface"
         );
     }
 
@@ -119,6 +117,24 @@ async fn demonstration() -> Result<()> {
     Ok(())
 }
 
+
+async fn initiate_from_loopback() -> Result<Endpoint> {
+    Ok(Endpoint::builder(presets::Minimal)
+        .clear_ip_transports()
+        .bind_addr("127.0.0.1:0")?
+        .bind()
+        .await?)
+}
+
+async fn accept_on_loopback() -> Result<Endpoint> {
+    Ok(Endpoint::builder(presets::Minimal)
+        .clear_ip_transports()
+        .bind_addr("127.0.0.1:0")?
+        .alpns(vec![ALPN.to_vec()])
+        .bind()
+        .await?)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     demonstration().await
@@ -135,12 +151,9 @@ mod tests {
 
     #[tokio::test]
     async fn wrong_sender_identity_does_not_complete_ack() -> Result<()> {
-        let a = Endpoint::builder(presets::Minimal).bind().await?;
-        let b = Endpoint::builder(presets::Minimal)
-            .alpns(vec![ALPN.to_vec()])
-            .bind()
-            .await?;
-        let other = Endpoint::builder(presets::Minimal).bind().await?;
+        let a = initiate_from_loopback().await?;
+        let b = accept_on_loopback().await?;
+        let other = initiate_from_loopback().await?;
         let payload = frame([0x42u8; SCOPE_BYTES], [0u8; PROOF_BYTES]);
         let result = hop(&a, &b, other.id(), [0x42u8; SCOPE_BYTES], &payload).await;
         ensure_any!(result.is_err(), "unrecognized sender was accepted");
@@ -152,11 +165,8 @@ mod tests {
 
     #[tokio::test]
     async fn wrong_scope_cannot_complete_ack_and_no_extra_bytes_are_allowed() -> Result<()> {
-        let a = Endpoint::builder(presets::Minimal).bind().await?;
-        let b = Endpoint::builder(presets::Minimal)
-            .alpns(vec![ALPN.to_vec()])
-            .bind()
-            .await?;
+        let a = initiate_from_loopback().await?;
+        let b = accept_on_loopback().await?;
         let payload = frame([0x01u8; SCOPE_BYTES], [0u8; PROOF_BYTES]);
         let rejected = hop(&a, &b, a.id(), [0x42u8; SCOPE_BYTES], &payload).await;
         ensure_any!(rejected.is_err(), "wrong scope was accepted");
