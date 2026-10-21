@@ -105,7 +105,10 @@ env:
   RUST_BACKTRACE: 1
   RUSTFLAGS: -Dwarnings
   MSRV: "1.66"
-  # SCCACHE_GHA_ENABLED: "true"
+  # Share release-profile compilation results across ephemeral GitHub runners.
+  # This uses the same GHA cache backend as Patchbay; the probe falls back
+  # to plain rustc if the cache service is unavailable.
+  SCCACHE_GHA_ENABLED: "on"
   RUSTC_WRAPPER: "sccache"
   IROH_FORCE_STAGING_RELAYS: "1"
 
