@@ -26,6 +26,10 @@ on:
         type: string
         default: ""
 
+concurrency:
+  group: netsim-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   RUST_BACKTRACE: 1
   RUSTFLAGS: -Dwarnings

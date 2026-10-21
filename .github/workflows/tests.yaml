@@ -88,19 +88,19 @@ jobs:
               os: macOS-latest                                                                                                                                             
               release-os: darwin                                                                                                                                           
               release-arch: aarch64   
-              runs_on: '["self-hosted","macOS","ARM64"]'                                                                                                                   
+              runs_on: '["macos-latest"]'                                                                                                                   
             - name: macOS-arm-latest                                                                                
               features: none                                                                                                                                               
               os: macOS-latest
               release-os: darwin                                                                                                                                           
               release-arch: aarch64                                                                                 
-              runs_on: '["self-hosted","macOS","ARM64"]'
+              runs_on: '["macos-latest"]'
             - name: macOS-arm-latest                                                                                                                                       
               features: default
               os: macOS-latest                                                                                                                                             
               release-os: darwin                                                                                    
               release-arch: aarch64   
-              runs_on: '["self-hosted","macOS","ARM64"]'
+              runs_on: '["macos-latest"]'
     env:
       # Using self-hosted runners so use local cache for sccache and
       # not SCCACHE_GHA_ENABLED.
