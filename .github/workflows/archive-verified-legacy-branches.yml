@@ -67,8 +67,10 @@ jobs:
               echo "::error::Invalid archival proof type $kind"
               return 1
             fi
+            # archive_one is invoked in an if-condition. Bash disables errexit
+            # inside such functions, so propagate archive failures explicitly.
             TARGET_BRANCH="$branch" EXPECTED_SHA="$expected" MODE="ARCHIVE" CONFIRMATION="ARCHIVE" \
-              bash .github/scripts/archive-orphan.sh
+              bash .github/scripts/archive-orphan.sh || return 1
             echo "Archived $branch with proof $kind / $witness"
           }
           while IFS='|' read -r kind branch expected witness; do
