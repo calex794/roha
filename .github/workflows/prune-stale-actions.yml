@@ -28,6 +28,8 @@ jobs:
         with:
           ref: main
           persist-credentials: false
+      - name: Verify stale-run classification regressions
+        run: python3 -m unittest discover -s .github/scripts -p 'test_prune_stale_actions.py'
       - name: Cancel stale work and stranded optional self-hosted jobs
         env:
           GH_TOKEN: ${{ github.token }}
