@@ -755,7 +755,11 @@ async fn sty_nat_restore_same_connection_flush_and_local_network_hint() -> Resul
 /// mapping rather than an intrinsically unpunchable restored topology. If this
 /// fresh pair is also relayed, inspect the emulated NAT/firewall rules before
 /// changing production routing. This intentionally uses no Akula user files.
-async fn run_server_replug_new_endpoint_control(reuse_device: bool, reuse_port: bool, flush_nat: bool) -> Result {
+async fn run_server_replug_new_endpoint_control(
+    reuse_device: bool,
+    reuse_port: bool,
+    flush_nat: bool,
+) -> Result {
     let (lab, relay_map, _relay_guard, guard) = lab_with_relay(testdir!()).await?;
     let initial_router = lab.add_router("initial").nat(Nat::Moderate).build().await?;
     let initial_id = initial_router.id();
@@ -879,7 +883,10 @@ async fn run_server_replug_new_endpoint_control(reuse_device: bool, reuse_port: 
         .await?;
 
     if flush_nat {
-        initial_router.flush_nat_state().await.context("STY reset simulated NAT conntrack")?;
+        initial_router
+            .flush_nat_state()
+            .await
+            .context("STY reset simulated NAT conntrack")?;
         info!("STY restored-server NAT state flushed");
     }
 
