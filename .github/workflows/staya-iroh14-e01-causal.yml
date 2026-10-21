@@ -74,8 +74,9 @@ jobs:
               fi
             else
               if [ "${code}" -eq 101 ] &&
-                 grep -q 'test result: FAILED' "${log}" &&
-                 grep -q 'STY server recovery paths.*success=false' "${log}"; then
+                 grep -q 'test result: FAILED. 0 passed; 1 failed' "${log}" &&
+                 grep -q 'STY_PATH_RELAY_SELECTED' "${log}" &&
+                 ! grep -q 'STY_PATH_DIRECT_RECOVERED' "${log}"; then
                 if [ "${scenario}" != sty_nat_restore_same_connection_unrelated_dns_deletion ] ||
                    grep -q 'STY_E01_EXACT_OLD_FLOW_DELETE' "${log}"; then
                   valid=1
