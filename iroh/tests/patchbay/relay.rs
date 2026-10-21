@@ -400,6 +400,48 @@ async fn sty_fixture_accept(conn: &Connection, timeout: Duration) -> Result {
     .with_std_context(|_| format!("STY fixture receiver timed out after {timeout:?}"))?
 }
 
+/// Read-only netfilter snapshot from the actual Patchbay router namespace.
+/// Diagnostic-only: never clear NAT here or use host conntrack as a substitute.
+/// The map and conntrack are distinct state stores, so capture BOTH.
+fn sty_nat_state_snapshot(router: &patchbay::Router, stage: &'static str) {
+    let snapshot = router.run_sync(|| {
+        let mut report = String::new();
+        for (label, program, args) in [
+            (
+                "conntrack_udp",
+                "conntrack",
+                &["-L", "-p", "udp", "-o", "extended"][..],
+            ),
+            (
+                "nft_fullcone",
+                "nft",
+                &["-a", "list", "map", "ip", "nat", "fullcone"][..],
+            ),
+        ] {
+            match std::process::Command::new(program).args(args).output() {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    report.push_str(&format!(
+                        "{label}: exit={}; stdout={} stderr={}\n",
+                        output.status,
+                        stdout.chars().take(12_000).collect::<String>(),
+                        stderr.chars().take(1_500).collect::<String>(),
+                    ));
+                }
+                Err(err) => {
+                    report.push_str(&format!("{label}: exec_error={err}\n"));
+                }
+            }
+        }
+        Ok(report)
+    });
+    match snapshot {
+        Ok(report) => info!(stage, nat_state = %report, "STY_NAT_SNAPSHOT"),
+        Err(err) => tracing::warn!(stage, error = %err, "STY_NAT_SNAPSHOT_FAILED"),
+    }
+}
+
 /// STY-RN-5: change an established direct path into a relay-only path without
 /// closing the QUIC connection, then restore a direct path on the same session.
 ///
@@ -443,12 +485,18 @@ async fn run_direct_relay_direct(
             conn.wait_ip(setup)
                 .await
                 .context("STY direct: first direct path")?;
+            if notify_replugged_local {
+                sty_nat_state_snapshot(&initial, "initial_direct");
+            }
             ping_accept(&conn, setup)
                 .await
                 .context("STY direct: first ping")?;
 
             info!("STY_PATH_DIRECT_TO_RELAY: replugging into UDP-blocked access");
             dev.iface("eth0").unwrap().replug(blocked.id()).await?;
+            if notify_replugged_local {
+                sty_nat_state_snapshot(&initial, "after_leaving_initial");
+            }
             info!(advertised = ?ep.addr(), "STY address after UDP-blocked replug");
             // Drive the same connection while UDP to the peer is unavailable.
             ping_accept(&conn, recovery)
@@ -467,6 +515,9 @@ async fn run_direct_relay_direct(
                 .context("STY relay: byte-for-byte payload")?;
 
             dev.iface("eth0").unwrap().replug(initial.id()).await?;
+            if notify_replugged_local {
+                sty_nat_state_snapshot(&initial, "restored_before_any_flush");
+            }
             if flush_nat_after_restore {
                 // An isolation control on Patchbay's simulated router, not a
                 // production recommendation to erase customer conntrack state.
@@ -481,6 +532,9 @@ async fn run_direct_relay_direct(
                 // is sent to the endpoint whose network actually changed.
                 ep.network_change().await;
                 info!("STY_SAME_CONNECTION_LOCAL_NETWORK_HINT");
+            }
+            if notify_replugged_local {
+                sty_nat_state_snapshot(&initial, "restored_after_action");
             }
             info!(advertised = ?ep.addr(), "STY address immediately after restoring network");
             if notify_peer {
@@ -528,6 +582,9 @@ async fn run_direct_relay_direct(
                     .context("STY diagnostic: checked payload after restoring network")?;
             }
             let result = conn.wait_ip(recovery).await;
+            if notify_replugged_local {
+                sty_nat_state_snapshot(&initial, "after_recovery_observation");
+            }
             let paths = conn
                 .paths()
                 .iter()
