@@ -17,7 +17,7 @@ BASE = ["docker", "compose", "-f", str(COMPOSE), "-p", PROJECT]
 def run(*args, ok=True, timeout=120):
     result = subprocess.run([*BASE, *args], capture_output=True, text=True, timeout=timeout)
     if ok and result.returncode:
-        raise RuntimeError(f"{' '.join(args)}: {result.stderr[-1000:]}")
+        raise RuntimeError(f"{' '.join(args)}: {result.stderr[-12000:]}")
     return result
 
 
@@ -70,7 +70,14 @@ def main():
     report = {"network": "one internal Docker bridge, direct Roha/noq QUIC, no relay",
               "users": len(NODES), "checks": [], "status": "FAIL"}
     try:
-        run("up", "--build", "-d", "--wait", timeout=2400)
+        built = subprocess.run(
+            ["docker", "build", "--progress=plain", "-t", "akula-roha-ten-peer:local",
+             "-f", "labs/ten-peer/Dockerfile", "."],
+            cwd=Path(__file__).resolve().parents[2],
+            capture_output=True, text=True, timeout=2400)
+        if built.returncode:
+            raise RuntimeError("docker build failed:\n" + built.stdout[-12000:] + built.stderr[-12000:])
+        run("up", "--no-build", "-d", "--wait", timeout=240)
         keys = {node: result(node, "id") for node in NODES}
         assert len(set(keys.values())) == 10
         report["checks"].append("10 independent identities")
