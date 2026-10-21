@@ -28,6 +28,8 @@ jobs:
           docker --version
           docker compose version
           python3 -m py_compile labs/ten-peer/run.py
+      - name: Check Rust messenger example
+        run: cargo check --locked -p iroh --example akula_chat_lab
       - name: Build and run ten real containers
         run: python3 labs/ten-peer/run.py --output labs/ten-peer/report.json
       - name: Archive lab report
