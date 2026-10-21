@@ -27,6 +27,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Test the PR branch HEAD, not GitHub's synthetic PR merge ref.
+          # The parent integration branch can receive unrelated Cargo.lock fixes.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
@@ -60,7 +63,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: staya-iroh14-nat-${{ github.sha }}
+          name: staya-iroh14-nat-${{ github.event.pull_request.head.sha || github.sha }}
           path: |
             ${{ runner.temp }}/sty_nat_restore_same_connection_*.log
             ${{ runner.temp }}/nat-matrix-results.txt
