@@ -57,7 +57,9 @@ fi
 check_open_pr_dependencies
 
 archive_tag="archive/${TARGET_BRANCH}/${EXPECTED_SHA:0:12}"
-existing="$(gh api "repos/${REPO}/git/ref/tags/${archive_tag}" --jq '.object.sha' 2>/dev/null || true)"
+# A missing ref can render as JSON null through gh --jq; do not mistake
+# that literal string for an existing tag with a conflicting commit.
+existing="$(gh api "repos/${REPO}/git/ref/tags/${archive_tag}" --jq '.object.sha // empty' 2>/dev/null || true)"
 if [[ -n "${existing}" && "${existing}" != "${EXPECTED_SHA}" ]]; then
   echo "::error::Archive tag already exists with a different commit"
   exit 1
@@ -74,7 +76,7 @@ if [[ -z "${existing}" ]]; then
   gh api --method POST "repos/${REPO}/git/refs" \
     -f ref="refs/tags/${archive_tag}" -f sha="${EXPECTED_SHA}" --silent
 fi
-tag_sha="$(gh api "repos/${REPO}/git/ref/tags/${archive_tag}" --jq '.object.sha')"
+tag_sha="$(gh api "repos/${REPO}/git/ref/tags/${archive_tag}" --jq '.object.sha // empty')"
 if [[ "${tag_sha}" != "${EXPECTED_SHA}" ]]; then
   echo "::error::Archive tag did not verify; branch remains intact"
   exit 1
