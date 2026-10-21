@@ -1,0 +1,99 @@
+name: Staya Roha E01 causal controls
+
+on:
+  pull_request:
+    paths:
+      - "iroh/tests/patchbay/relay.rs"
+      - ".github/workflows/staya-iroh14-e01-causal.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staya-roha-e01-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  exact-tuple-vs-controls:
+    name: E01 exact old peer tuple vs unrelated DNS and noop
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      RUST_BACKTRACE: "1"
+      RUST_LOG: "info,iroh::socket=debug"
+    steps:
+      - name: Checkout exact branch HEAD
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: Verify upstream base and unchanged production code
+        run: |
+          git merge-base --is-ancestor 55908a5809b61c72ec8deeff024038f4a9d68ab7 HEAD
+          git diff --exit-code 55908a5809b61c72ec8deeff024038f4a9d68ab7 HEAD -- Cargo.lock iroh/src
+      - name: Verify Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Install isolated NAT tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y conntrack
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          unshare --user --map-root-user true
+      - name: Run three causal controls, verify expected results rather than generic exit
+        shell: bash
+        run: |
+          set +e
+          set -uo pipefail
+          failed=0
+          : > "${RUNNER_TEMP}/e01-results.txt"
+          for spec in \
+            "sty_nat_restore_same_connection_targeted_old_peer_flow:PASS" \
+            "sty_nat_restore_same_connection_noop_control:RED" \
+            "sty_nat_restore_same_connection_unrelated_dns_deletion:RED"; do
+            scenario=${spec%:*}
+            expected=${spec#*:}
+            log="${RUNNER_TEMP}/${scenario}.log"
+            echo "::group::${scenario} (expected ${expected})"
+            cargo test --locked -p iroh --test patchbay "relay::${scenario}" -- --exact --nocapture --test-threads=1 > "${log}" 2>&1
+            code=$?
+            cat "${log}"
+            valid=0
+            if [ "${expected}" = PASS ]; then
+              if [ "${code}" -eq 0 ] &&
+                 grep -q 'test result: ok. 1 passed' "${log}" &&
+                 grep -q 'STY_E01_EXACT_OLD_FLOW_DELETE' "${log}" &&
+                 grep -q 'STY_PATH_DIRECT_RECOVERED' "${log}"; then
+                valid=1
+              fi
+            else
+              if [ "${code}" -eq 101 ] &&
+                 grep -q 'test result: FAILED' "${log}" &&
+                 grep -q 'STY server recovery paths.*success=false' "${log}"; then
+                if [ "${scenario}" != sty_nat_restore_same_connection_unrelated_dns_deletion ] ||
+                   grep -q 'STY_E01_EXACT_OLD_FLOW_DELETE' "${log}"; then
+                  valid=1
+                fi
+              fi
+            fi
+            echo "::endgroup::"
+            printf '%s expected=%s exit=%s accepted=%s\n' "${scenario}" "${expected}" "${code}" "${valid}" | tee -a "${RUNNER_TEMP}/e01-results.txt"
+            if [ "${valid}" -ne 1 ]; then failed=1; fi
+          done
+          exit "${failed}"
+      - name: Preserve exact E01 evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: staya-roha-e01-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            ${{ runner.temp }}/sty_nat_restore_same_connection_*.log
+            ${{ runner.temp }}/e01-results.txt
+          if-no-files-found: ignore
+          retention-days: 7
