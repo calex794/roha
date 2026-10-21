@@ -461,8 +461,7 @@ fn sty_udp_original_tuple(line: &str) -> Option<[String; 4]> {
         .take(4)
         .collect::<Vec<_>>();
     if fields.len() != 4
-        || [fields[0].0, fields[1].0, fields[2].0, fields[3].0]
-            != ["src", "dst", "sport", "dport"]
+        || [fields[0].0, fields[1].0, fields[2].0, fields[3].0] != ["src", "dst", "sport", "dport"]
     {
         return None;
     }
@@ -483,7 +482,10 @@ fn sty_delete_one_old_flow(
     control: StyFlowDeletion,
 ) -> Result {
     ensure_any!(
-        matches!(control, StyFlowDeletion::OldPeer | StyFlowDeletion::UnrelatedDns),
+        matches!(
+            control,
+            StyFlowDeletion::OldPeer | StyFlowDeletion::UnrelatedDns
+        ),
         "E01 deletion control must name a flow"
     );
     let summary = router.run_sync(move || {
@@ -821,31 +823,76 @@ async fn run_direct_relay_direct(
 #[tokio::test]
 #[traced_test]
 async fn direct_relay_direct_client_replug() -> Result {
-    run_direct_relay_direct(Side::Client, false, false, false, false, false, StyFlowDeletion::None).await
+    run_direct_relay_direct(
+        Side::Client,
+        false,
+        false,
+        false,
+        false,
+        false,
+        StyFlowDeletion::None,
+    )
+    .await
 }
 
 #[tokio::test]
 #[traced_test]
 async fn direct_relay_direct_server_replug() -> Result {
-    run_direct_relay_direct(Side::Server, false, false, false, false, false, StyFlowDeletion::None).await
+    run_direct_relay_direct(
+        Side::Server,
+        false,
+        false,
+        false,
+        false,
+        false,
+        StyFlowDeletion::None,
+    )
+    .await
 }
 
 #[tokio::test]
 #[traced_test]
 async fn direct_relay_direct_server_with_traffic_probe() -> Result {
-    run_direct_relay_direct(Side::Server, true, false, false, false, false, StyFlowDeletion::None).await
+    run_direct_relay_direct(
+        Side::Server,
+        true,
+        false,
+        false,
+        false,
+        false,
+        StyFlowDeletion::None,
+    )
+    .await
 }
 
 #[tokio::test]
 #[traced_test]
 async fn direct_relay_direct_server_with_peer_network_hint() -> Result {
-    run_direct_relay_direct(Side::Server, false, true, false, false, false, StyFlowDeletion::None).await
+    run_direct_relay_direct(
+        Side::Server,
+        false,
+        true,
+        false,
+        false,
+        false,
+        StyFlowDeletion::None,
+    )
+    .await
 }
 
 #[tokio::test]
 #[traced_test]
 async fn direct_relay_direct_server_fresh_connection_control() -> Result {
-    run_direct_relay_direct(Side::Server, false, false, true, false, false, StyFlowDeletion::None).await
+    run_direct_relay_direct(
+        Side::Server,
+        false,
+        false,
+        true,
+        false,
+        false,
+        StyFlowDeletion::None,
+    )
+    .await
 }
 
 // Separate from the nine historical A/B scenarios, which all retain their
@@ -854,19 +901,46 @@ async fn direct_relay_direct_server_fresh_connection_control() -> Result {
 #[tokio::test]
 #[traced_test]
 async fn sty_nat_restore_same_connection_flush_only() -> Result {
-    run_direct_relay_direct(Side::Server, false, false, false, true, false, StyFlowDeletion::None).await
+    run_direct_relay_direct(
+        Side::Server,
+        false,
+        false,
+        false,
+        true,
+        false,
+        StyFlowDeletion::None,
+    )
+    .await
 }
 
 #[tokio::test]
 #[traced_test]
 async fn sty_nat_restore_same_connection_local_network_hint_only() -> Result {
-    run_direct_relay_direct(Side::Server, false, false, false, false, true, StyFlowDeletion::None).await
+    run_direct_relay_direct(
+        Side::Server,
+        false,
+        false,
+        false,
+        false,
+        true,
+        StyFlowDeletion::None,
+    )
+    .await
 }
 
 #[tokio::test]
 #[traced_test]
 async fn sty_nat_restore_same_connection_flush_and_local_network_hint() -> Result {
-    run_direct_relay_direct(Side::Server, false, false, false, true, true, StyFlowDeletion::None).await
+    run_direct_relay_direct(
+        Side::Server,
+        false,
+        false,
+        false,
+        true,
+        true,
+        StyFlowDeletion::None,
+    )
+    .await
 }
 
 // Targeted experiment: delete ONLY the old source's direct-peer conntrack
@@ -874,19 +948,46 @@ async fn sty_nat_restore_same_connection_flush_and_local_network_hint() -> Resul
 #[tokio::test]
 #[traced_test]
 async fn sty_nat_restore_same_connection_targeted_old_peer_flow() -> Result {
-    run_direct_relay_direct(Side::Server, false, false, false, false, false, StyFlowDeletion::OldPeer).await
+    run_direct_relay_direct(
+        Side::Server,
+        false,
+        false,
+        false,
+        false,
+        false,
+        StyFlowDeletion::OldPeer,
+    )
+    .await
 }
 
 #[tokio::test]
 #[traced_test]
 async fn sty_nat_restore_same_connection_noop_control() -> Result {
-    run_direct_relay_direct(Side::Server, false, false, false, false, false, StyFlowDeletion::Noop).await
+    run_direct_relay_direct(
+        Side::Server,
+        false,
+        false,
+        false,
+        false,
+        false,
+        StyFlowDeletion::Noop,
+    )
+    .await
 }
 
 #[tokio::test]
 #[traced_test]
 async fn sty_nat_restore_same_connection_unrelated_dns_deletion() -> Result {
-    run_direct_relay_direct(Side::Server, false, false, false, false, false, StyFlowDeletion::UnrelatedDns).await
+    run_direct_relay_direct(
+        Side::Server,
+        false,
+        false,
+        false,
+        false,
+        false,
+        StyFlowDeletion::UnrelatedDns,
+    )
+    .await
 }
 
 /// STY-RN-5 isolation control: after the *server* moves through an UDP-blocked
