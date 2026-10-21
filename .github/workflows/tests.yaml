@@ -106,10 +106,12 @@ jobs:
       # not SCCACHE_GHA_ENABLED.
       RUSTC_WRAPPER: "sccache"
     steps:
-      - name: Configure sccache backend                                                                               
+      - name: Configure sccache backend
+        env:
+          RUNNER_ENV_KIND: ${{ runner.environment }}                                                                               
         shell: bash                     
         run: |
-            if [[ "${{ runner.environment }}" == "github-hosted" || "${RUNNER_NAME:-}" == blacksmith-* ]]; then                                                                                                                  
+            if [[ "$RUNNER_ENV_KIND" == "github-hosted" || "${RUNNER_NAME:-}" == blacksmith-* ]]; then                                                                                                                  
               echo "Runner: $RUNNER_NAME → GHA-backed sccache"
               echo "SCCACHE_GHA_ENABLED=on" >> "$GITHUB_ENV"                                                                                                                   
             else                                                                                                                                                               
@@ -254,9 +256,11 @@ jobs:
       RUSTUP_TOOLCHAIN: "${{ matrix.rust }}"
     steps:
       - name: Configure sccache backend
+        env:
+          RUNNER_ENV_KIND: ${{ runner.environment }}
         shell: bash
         run: |
-            if [[ "${{ runner.environment }}" == "github-hosted" || "${RUNNER_NAME:-}" == blacksmith-* ]]; then
+            if [[ "$RUNNER_ENV_KIND" == "github-hosted" || "${RUNNER_NAME:-}" == blacksmith-* ]]; then
               echo "Runner: $RUNNER_NAME → GHA-backed sccache"
               echo "SCCACHE_GHA_ENABLED=on" >> "$GITHUB_ENV"
             else
