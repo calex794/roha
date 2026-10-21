@@ -1,0 +1,24 @@
+name: Akula scoped anti-meme direct Roha transport laboratory
+on:
+  pull_request:
+    paths:
+      - 'iroh/examples/akula_scope_antimeme_transport_lab.rs'
+      - 'labs/akula-antimeme-transport/**'
+      - '.github/workflows/akula-scope-antimeme-transport.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: roha-akula-antimeme-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  direct-only:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run three independent Iroh endpoint transport tests
+        run: cargo test --locked -p iroh --example akula_scope_antimeme_transport_lab -- --nocapture
