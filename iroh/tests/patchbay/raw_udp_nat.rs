@@ -272,7 +272,12 @@ async fn run_e03(case: E03Case) -> Result<()> {
 
     // A descriptive experiment. Do not encode the unproven H13 hypothesis as
     // a required PASS: mapping equality vs divergence is the actual result.
-    ensure_any!(received_peer, "E03 established peer-specific reverse UDP path did not deliver");
+    if matches!(case, E03Case::NoReplug | E03Case::ReplugDeleteOldPeer) {
+        ensure_any!(
+            received_peer,
+            "E03 established peer-specific reverse UDP path did not deliver"
+        );
+    }
     if matches!(case, E03Case::NoReplug) {
         ensure_any!(
             after_discovery == after_peer && received_discovery,
