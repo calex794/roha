@@ -4,7 +4,7 @@
 name: Auto-merge enrollment
 
 on:
-  workflow_run:
+  workflow_run: # zizmor: ignore[dangerous-triggers] trusted default-branch only; no PR checkout/execution; exact-SHA, author and enforced-ruleset gates
     workflows: [CI, workflow lint, Workflow Lint]
     types: [completed]
 
