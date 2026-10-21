@@ -49,6 +49,8 @@ mod nat;
 mod network_switch_no_wan;
 #[path = "patchbay/relay.rs"]
 mod relay;
+#[path = "patchbay/raw_udp_nat.rs"]
+mod raw_udp_nat;
 #[path = "patchbay/switch-uplink.rs"]
 mod switch_uplink;
 #[path = "patchbay/util.rs"]
