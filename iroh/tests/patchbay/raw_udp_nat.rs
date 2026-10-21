@@ -29,6 +29,8 @@ enum E03Case {
     NoReplug,
     ReplugStale,
     ReplugDeleteOldPeer,
+    ReplugBurstStale,
+    ReplugBurstDeleteOldPeer,
 }
 
 /// Reflect the observed external UDP source address and report it out-of-band.
@@ -104,6 +106,38 @@ async fn observed(
     })
     .await
     .map_err(|_| anyerr!("E03 reflector timeout for {label}"))?
+}
+
+/// E03b: enqueue both destinations before receiving ANY reflector response.
+/// This isolates ordering/concurrency from NAT replug and tuple reuse.
+async fn burst_observed(
+    tx: &mpsc::UnboundedSender<(SocketAddr, &'static str)>,
+    reports: &mut mpsc::UnboundedReceiver<(String, SocketAddr)>,
+    discovery_addr: SocketAddr,
+    peer_addr: SocketAddr,
+) -> Result<(SocketAddr, SocketAddr)> {
+    tx.send((discovery_addr, "BURST_DISCOVERY"))
+        .map_err(|_| anyerr!("E03b UDP sender closed before discovery"))?;
+    tx.send((peer_addr, "BURST_PEER"))
+        .map_err(|_| anyerr!("E03b UDP sender closed before peer"))?;
+    tokio::time::timeout(E03_TIMEOUT, async {
+        let mut discovery = None;
+        let mut peer = None;
+        while discovery.is_none() || peer.is_none() {
+            let (label, observed) = reports
+                .recv()
+                .await
+                .ok_or_else(|| anyerr!("E03b reflector exited"))?;
+            match label.as_str() {
+                "BURST_DISCOVERY" => discovery = Some(observed),
+                "BURST_PEER" => peer = Some(observed),
+                _ => (),
+            }
+        }
+        Ok((discovery.unwrap(), peer.unwrap()))
+    })
+    .await
+    .map_err(|_| anyerr!("E03b reflector timeout for burst pair"))?
 }
 
 fn delete_exact_old_peer(
@@ -236,15 +270,27 @@ async fn run_e03(case: E03Case) -> Result<()> {
             "E03 replug must allocate a different internal IP"
         );
     }
-    if matches!(case, E03Case::ReplugDeleteOldPeer) {
+    if matches!(
+        case,
+        E03Case::ReplugDeleteOldPeer | E03Case::ReplugBurstDeleteOldPeer
+    ) {
         delete_exact_old_peer(&initial, initial_private, local_port, peer_addr)?;
     }
 
-    // Revisit the discovery endpoint FIRST, as Iroh does before peer punches.
-    // Out-of-band reports work even if the NAT discards UDP responses.
-    let after_discovery =
-        observed(&cmd_tx, &mut event_rx, discovery_addr, "AFTER_DISCOVERY").await?;
-    let after_peer = observed(&cmd_tx, &mut event_rx, peer_addr, "AFTER_PEER").await?;
+    // E03 sequential: wait for the first reflector before sending to peer.
+    // E03b burst: enqueue both without waiting for an external response.
+    // Both use the exact same original UDP socket and device replug.
+    let (after_discovery, after_peer) = if matches!(
+        case,
+        E03Case::ReplugBurstStale | E03Case::ReplugBurstDeleteOldPeer
+    ) {
+        burst_observed(&cmd_tx, &mut event_rx, discovery_addr, peer_addr).await?
+    } else {
+        let discovery =
+            observed(&cmd_tx, &mut event_rx, discovery_addr, "AFTER_DISCOVERY").await?;
+        let peer = observed(&cmd_tx, &mut event_rx, peer_addr, "AFTER_PEER").await?;
+        (discovery, peer)
+    };
     info!(
         ?case,
         %initial_private,
@@ -295,7 +341,12 @@ async fn run_e03(case: E03Case) -> Result<()> {
 
     // A descriptive experiment. Do not encode the unproven H13 hypothesis as
     // a required PASS: mapping equality vs divergence is the actual result.
-    if matches!(case, E03Case::NoReplug | E03Case::ReplugDeleteOldPeer) {
+    if matches!(
+        case,
+        E03Case::NoReplug
+            | E03Case::ReplugDeleteOldPeer
+            | E03Case::ReplugBurstDeleteOldPeer
+    ) {
         ensure_any!(
             received_peer,
             "E03 established peer-specific reverse UDP path did not deliver"
@@ -332,4 +383,16 @@ async fn sty_e03_raw_udp_replug_stale_state() -> Result<()> {
 #[traced_test]
 async fn sty_e03_raw_udp_replug_targeted_delete() -> Result<()> {
     run_e03(E03Case::ReplugDeleteOldPeer).await
+}
+
+#[tokio::test]
+#[traced_test]
+async fn sty_e03b_raw_udp_burst_stale() -> Result<()> {
+    run_e03(E03Case::ReplugBurstStale).await
+}
+
+#[tokio::test]
+#[traced_test]
+async fn sty_e03b_raw_udp_burst_targeted_delete() -> Result<()> {
+    run_e03(E03Case::ReplugBurstDeleteOldPeer).await
 }
