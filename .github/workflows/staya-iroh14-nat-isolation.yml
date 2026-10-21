@@ -49,7 +49,7 @@ jobs:
           failed=0
           for scenario in             sty_nat_restore_same_connection_flush_only             sty_nat_restore_same_connection_local_network_hint_only             sty_nat_restore_same_connection_flush_and_local_network_hint; do
             echo "::group::${scenario}"
-            cargo test --locked -p iroh --test patchbay "${scenario}" -- --exact --nocapture --test-threads=1 2>&1 | tee "${RUNNER_TEMP}/${scenario}.log"
+            cargo test --locked -p iroh --test patchbay "relay::${scenario}" -- --exact --nocapture --test-threads=1 2>&1 | tee "${RUNNER_TEMP}/${scenario}.log"
             code=${PIPESTATUS[0]}
             echo "::endgroup::"
             if [ "${code}" -ne 0 ]; then failed=1; fi
