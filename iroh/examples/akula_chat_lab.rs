@@ -201,7 +201,11 @@ async fn command(command: Command, endpoint: &Endpoint, state: &State) -> LabRes
 }
 
 async fn control(mut stream: UnixStream, endpoint: Endpoint, state: Arc<State>) -> LabResult<()> {
-    let data = stream.read_to_end(MAX_FRAME).await?;
+    let mut data = Vec::new();
+    (&mut stream).take((MAX_FRAME + 1) as u64).read_to_end(&mut data).await?;
+    if data.len() > MAX_FRAME {
+        return Err("oversize control message".into());
+    }
     let result = async {
         let cmd = serde_json::from_slice::<Command>(&data)?;
         command(cmd, &endpoint, &state).await
