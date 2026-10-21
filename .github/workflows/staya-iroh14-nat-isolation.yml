@@ -48,6 +48,9 @@ jobs:
       - name: Run existing-session controls separately and preserve all results
         shell: bash
         run: |
+          # GitHub's bash wrapper starts with -e; disable it so the matrix
+          # executes every case even when an expected RED test returns 101.
+          set +e
           set -uo pipefail
           failed=0
           for scenario in             sty_nat_restore_same_connection_flush_only             sty_nat_restore_same_connection_local_network_hint_only             sty_nat_restore_same_connection_flush_and_local_network_hint; do
