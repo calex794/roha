@@ -119,11 +119,17 @@ fn delete_exact_old_peer(
     let summary = router.run_sync(move || {
         let output = std::process::Command::new("conntrack")
             .args([
-                "-D", "-p", "udp",
-                "--orig-src", old_src.as_str(),
-                "--orig-dst", old_dest.as_str(),
-                "--orig-port-src", old_sport.as_str(),
-                "--orig-port-dst", old_dport.as_str(),
+                "-D",
+                "-p",
+                "udp",
+                "--orig-src",
+                old_src.as_str(),
+                "--orig-dst",
+                old_dest.as_str(),
+                "--orig-port-src",
+                old_sport.as_str(),
+                "--orig-port-dst",
+                old_dport.as_str(),
             ])
             .output()?;
         let result = format!(
@@ -155,7 +161,9 @@ async fn run_e03(case: E03Case) -> Result<()> {
         .await?;
     let peer_router = lab.add_router("peer_reflector").build().await?;
     let discovery_router = lab.add_router("discovery_reflector").build().await?;
-    let peer_ip = peer_router.uplink_ip().ok_or_else(|| anyerr!("peer WAN missing"))?;
+    let peer_ip = peer_router
+        .uplink_ip()
+        .ok_or_else(|| anyerr!("peer WAN missing"))?;
     let discovery_ip = discovery_router
         .uplink_ip()
         .ok_or_else(|| anyerr!("discovery WAN missing"))?;
@@ -172,7 +180,13 @@ async fn run_e03(case: E03Case) -> Result<()> {
         raw_reflector(peer_addr, peer_ready_tx, peer_events, peer_poke_rx).await
     })?;
     let discovery_task = discovery_router.spawn(async move |_| {
-        raw_reflector(discovery_addr, discovery_ready_tx, event_tx, discovery_poke_rx).await
+        raw_reflector(
+            discovery_addr,
+            discovery_ready_tx,
+            event_tx,
+            discovery_poke_rx,
+        )
+        .await
     })?;
     tokio::time::timeout(E03_TIMEOUT, peer_ready_rx)
         .await
@@ -183,8 +197,14 @@ async fn run_e03(case: E03Case) -> Result<()> {
         .map_err(|_| anyerr!("E03 discovery reflector startup timeout"))?
         .map_err(|_| anyerr!("E03 discovery reflector startup failed"))?;
 
-    let device = lab.add_device("udp_sender").uplink(initial.id()).build().await?;
-    let initial_private = device.ip().ok_or_else(|| anyerr!("E03 initial private IP missing"))?;
+    let device = lab
+        .add_device("udp_sender")
+        .uplink(initial.id())
+        .build()
+        .await?;
+    let initial_private = device
+        .ip()
+        .ok_or_else(|| anyerr!("E03 initial private IP missing"))?;
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (rx_tx, mut rx_rx) = mpsc::unbounded_channel();
     let (port_tx, port_rx) = oneshot::channel();
@@ -207,7 +227,9 @@ async fn run_e03(case: E03Case) -> Result<()> {
         device.iface("eth0").unwrap().replug(blocked.id()).await?;
         device.iface("eth0").unwrap().replug(initial.id()).await?;
     }
-    let restored_private = device.ip().ok_or_else(|| anyerr!("E03 restored private IP missing"))?;
+    let restored_private = device
+        .ip()
+        .ok_or_else(|| anyerr!("E03 restored private IP missing"))?;
     if !matches!(case, E03Case::NoReplug) {
         ensure_any!(
             initial_private != restored_private,
@@ -220,7 +242,8 @@ async fn run_e03(case: E03Case) -> Result<()> {
 
     // Revisit the discovery endpoint FIRST, as Iroh does before peer punches.
     // Out-of-band reports work even if the NAT discards UDP responses.
-    let after_discovery = observed(&cmd_tx, &mut event_rx, discovery_addr, "AFTER_DISCOVERY").await?;
+    let after_discovery =
+        observed(&cmd_tx, &mut event_rx, discovery_addr, "AFTER_DISCOVERY").await?;
     let after_peer = observed(&cmd_tx, &mut event_rx, peer_addr, "AFTER_PEER").await?;
     info!(
         ?case,
