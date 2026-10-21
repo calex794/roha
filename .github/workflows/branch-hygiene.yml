@@ -46,7 +46,7 @@ jobs:
           fi
           # Only short-lived internal work branches. Keep upstream and release refs.
           case "${BRANCH}" in
-            fix/*|feature/*|lab/*|repro/*|experiment/*|integration/*|sync/*|ops/*|test/*|chore/*) ;;
+            ci/*|fix/*|feature/*|lab/*|repro/*|experiment/*|integration/*|sync/*|ops/*|test/*|chore/*) ;;
             *) echo "Skip non-ephemeral branch: ${BRANCH}"; exit 0 ;;
           esac
           actual_sha="$(gh api "repos/${REPO}/git/ref/heads/${BRANCH}" --jq '.object.sha' 2>/dev/null || true)"
