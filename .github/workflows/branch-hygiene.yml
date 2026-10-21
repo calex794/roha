@@ -5,19 +5,6 @@ on:
   pull_request:
     types: [closed]
   workflow_dispatch:
-    inputs:
-      archive_branch:
-        description: 'Optional orphan branch to archive before deleting; leave blank for report only'
-        required: false
-        type: string
-      archive_sha:
-        description: 'Required exact 40-character branch tip SHA for archival'
-        required: false
-        type: string
-      confirm_archive:
-        description: 'Type ARCHIVE to enable explicit preserve-then-delete operation'
-        required: false
-        type: string
   schedule:
     - cron: '23 7 * * 1'
 
@@ -26,7 +13,7 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: branch-hygiene-${{ github.event.pull_request.number || inputs.archive_branch || github.run_id }}
+  group: branch-hygiene-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: false
 
 jobs:
@@ -96,145 +83,6 @@ jobs:
             --force-with-lease="refs/heads/${BRANCH}:${EXPECTED_SHA}" \
             origin ":refs/heads/${BRANCH}"
           echo "Deleted merged internal head ${BRANCH} at ${EXPECTED_SHA}"
-
-  archive-orphan-explicit:
-    name: Archive one unmerged orphan (explicit confirmation)
-    if: >-
-      github.event_name == 'workflow_dispatch' &&
-      inputs.confirm_archive == 'ARCHIVE' &&
-      inputs.archive_branch != '' &&
-      inputs.archive_sha != ''
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-      pull-requests: read
-    steps:
-      - name: Preserve exact branch tip as tag, then remove original head
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          BRANCH: ${{ inputs.archive_branch }}
-          EXPECTED_SHA: ${{ inputs.archive_sha }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          set -euo pipefail
-          if [[ ! "${EXPECTED_SHA}" =~ ^[0-9a-fA-F]{40}$ ]] || \
-             [[ ! "${BRANCH}" =~ ^[A-Za-z0-9._/-]+$ ]]; then
-            echo "::error::Invalid immutable SHA or ref syntax"
-            exit 1
-          fi
-          if [[ "${BRANCH}" == "${DEFAULT_BRANCH}" ]]; then
-            echo "::error::Default branch is never archived"
-            exit 1
-          fi
-          case "${BRANCH}" in
-            fix/*|feature/*|lab/*|repro/*|experiment/*|integration/*|sync/*|ops/*|test/*|chore/*) ;;
-            *) echo "::error::Not a permitted short-lived work branch"; exit 1 ;;
-          esac
-          actual_sha="$(gh api "repos/${REPO}/git/ref/heads/${BRANCH}" --jq '.object.sha')"
-          protected="$(gh api "repos/${REPO}/branches/${BRANCH}" --jq '.protected')"
-          if [[ "${actual_sha}" != "${EXPECTED_SHA}" ]] || \
-             [[ "${protected}" != "false" ]]; then
-            echo "::error::Ref changed or is protected"
-            exit 1
-          fi
-          refs="$(gh api --paginate "repos/${REPO}/pulls?state=open&per_page=100" \
-            --jq '.[] | [.base.ref, .head.ref, (.head.repo.full_name // "")] | @tsv')"
-          while IFS=    name: Report branch inventory (no deletion)
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 12
-    steps:
-      - name: Review branches with no open PR
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          set -euo pipefail
-          mapfile -t rows < <(gh api --paginate "repos/${REPO}/branches?per_page=100" \
-            --jq '.[] | [.name, .commit.sha, (.protected|tostring)] | @tsv')
-          refs="$(gh api --paginate "repos/${REPO}/pulls?state=open&per_page=100" \
-            --jq '.[] | [.base.ref, .head.ref, (.head.repo.full_name // "")] | @tsv')"
-          now="$(date -u +%s)"
-          stale=0
-          {
-            echo "## Branch inventory: ${REPO}"
-            echo ""
-            echo "Tip commit age is an indicator only; this job NEVER deletes these candidates."
-            echo ""
-            echo "| Branch with no open PR | Tip commit age (days) | Tip SHA |"
-            echo "|---|---:|---|"
-          } >> "${GITHUB_STEP_SUMMARY}"
-          for row in "${rows[@]}"; do
-            IFS=$'\t' read -r branch sha protected <<< "${row}"
-            if [[ "${branch}" == "${DEFAULT_BRANCH}" ]] || \
-               [[ "${protected}" != "false" ]] || \
-               [[ "${branch}" == "generated-docs-preview" ]] || \
-               [[ "${branch}" == "gh-pages" ]]; then
-              continue
-            fi
-            case "${branch}" in
-              release/*|upstream/*) continue ;;
-            esac
-            linked=false
-            while IFS=$'\t' read -r base head head_repo; do
-              if [[ "${base}" == "${branch}" ]] || \
-                 { [[ "${head}" == "${branch}" ]] && [[ "${head_repo}" == "${REPO}" ]]; }; then
-                linked=true
-                break
-              fi
-            done <<< "${refs}"
-            if [[ "${linked}" == true ]]; then
-              continue
-            fi
-            committed="$(gh api "repos/${REPO}/commits/${sha}" --jq '.commit.committer.date' 2>/dev/null || true)"
-            [[ -z "${committed}" ]] && continue
-            commit_ts="$(date -u -d "${committed}" +%s)"
-            age="$(( (now - commit_ts) / 86400 ))"
-            if (( age >= 14 )); then
-              printf '| %s | %s | %s |\n' "${branch}" "${age}" "${sha:0:12}" >> "${GITHUB_STEP_SUMMARY}"
-              stale="$((stale + 1))"
-            fi
-          done
-          if (( stale == 0 )); then
-            echo "| No branches older than 14 days without an open PR | - | - |" >> "${GITHUB_STEP_SUMMARY}"
-          fi
-          echo "" >> "${GITHUB_STEP_SUMMARY}"
-          echo "Manual triage is required before deleting any unmerged branch. Open PR bases are retained." >> "${GITHUB_STEP_SUMMARY}"
-\t' read -r base head head_repo; do
-            if [[ "${base}" == "${BRANCH}" ]] || \
-               { [[ "${head}" == "${BRANCH}" ]] && [[ "${head_repo}" == "${REPO}" ]]; }; then
-              echo "::error::Branch is still used by an open PR"
-              exit 1
-            fi
-          done <<< "${refs}"
-
-          tag="archive/${BRANCH}/${EXPECTED_SHA:0:12}"
-          existing="$(gh api "repos/${REPO}/git/ref/tags/${tag}" --jq '.object.sha' 2>/dev/null || true)"
-          if [[ -n "${existing}" && "${existing}" != "${EXPECTED_SHA}" ]]; then
-            echo "::error::Archive tag collision"
-            exit 1
-          fi
-          if [[ -z "${existing}" ]]; then
-            gh api --method POST "repos/${REPO}/git/refs" \
-              -f ref="refs/tags/${tag}" -f sha="${EXPECTED_SHA}" --silent
-          fi
-          recorded="$(gh api "repos/${REPO}/git/ref/tags/${tag}" --jq '.object.sha')"
-          [[ "${recorded}" == "${EXPECTED_SHA}" ]] || { echo "::error::Archive tag verification failed"; exit 1; }
-
-          # Recheck current head and use a lease for the final deletion.
-          gh auth setup-git
-          cd "$(mktemp -d)"
-          git init -q
-          git remote add origin "https://github.com/${REPO}.git"
-          git push --porcelain --force-with-lease="refs/heads/${BRANCH}:${EXPECTED_SHA}" \
-            origin ":refs/heads/${BRANCH}"
-          printf 'Archived %s at %s as refs/tags/%s; deleted only the original branch ref.\n' \
-            "${BRANCH}" "${EXPECTED_SHA}" "${tag}" >> "${GITHUB_STEP_SUMMARY}"
 
   report-unreferenced-branches:
     name: Report branch inventory (no deletion)
