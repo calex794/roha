@@ -455,6 +455,7 @@ async fn run_direct_relay_direct(
     fresh_connection_control: bool,
     flush_nat_after_restore: bool,
     notify_replugged_local: bool,
+    delete_only_stale_peer_flow: bool,
 ) -> Result {
     let (lab, relay_map, _relay_guard, guard) = lab_with_relay(testdir!()).await?;
     let initial = lab.add_router("initial").nat(Nat::Moderate).build().await?;
@@ -469,6 +470,9 @@ async fn run_direct_relay_direct(
         .nat(Nat::Moderate)
         .build()
         .await?;
+    let peer_wan_ip = peer_net
+        .uplink_ip()
+        .ok_or_else(|| anyerr!("STY targeted flow: peer router has no WAN IPv4"))?;
     let replug = lab
         .add_device("replug")
         .uplink(initial.id())
@@ -482,10 +486,13 @@ async fn run_direct_relay_direct(
     let (fresh_addr_tx, fresh_addr_rx) = oneshot::channel::<iroh::EndpointAddr>();
     Pair::new(relay_map)
         .left(replug_side, replug, async move |dev, ep, conn| {
+            let initial_device_ip = dev
+                .ip()
+                .ok_or_else(|| anyerr!("STY targeted flow: initial device has no IPv4"))?;
             conn.wait_ip(setup)
                 .await
                 .context("STY direct: first direct path")?;
-            if notify_replugged_local {
+            if notify_replugged_local || delete_only_stale_peer_flow {
                 sty_nat_state_snapshot(&initial, "initial_direct");
             }
             ping_accept(&conn, setup)
@@ -494,7 +501,7 @@ async fn run_direct_relay_direct(
 
             info!("STY_PATH_DIRECT_TO_RELAY: replugging into UDP-blocked access");
             dev.iface("eth0").unwrap().replug(blocked.id()).await?;
-            if notify_replugged_local {
+            if notify_replugged_local || delete_only_stale_peer_flow {
                 sty_nat_state_snapshot(&initial, "after_leaving_initial");
             }
             info!(advertised = ?ep.addr(), "STY address after UDP-blocked replug");
@@ -515,8 +522,39 @@ async fn run_direct_relay_direct(
                 .context("STY relay: byte-for-byte payload")?;
 
             dev.iface("eth0").unwrap().replug(initial.id()).await?;
-            if notify_replugged_local {
+            if notify_replugged_local || delete_only_stale_peer_flow {
                 sty_nat_state_snapshot(&initial, "restored_before_any_flush");
+            }
+            if delete_only_stale_peer_flow {
+                // Delete only the former device's UDP flow to the remote peer WAN.
+                // This is an isolated Patchbay router namespace. Do not use
+                // conntrack -D against a customer's production router.
+                let old_src = initial_device_ip.to_string();
+                let peer_dst = peer_wan_ip.to_string();
+                let diagnostic = initial.run_sync(move || {
+                    let output = std::process::Command::new("conntrack")
+                        .args([
+                            "-D",
+                            "-p",
+                            "udp",
+                            "--orig-src",
+                            old_src.as_str(),
+                            "--orig-dst",
+                            peer_dst.as_str(),
+                        ])
+                        .output()?;
+                    if !output.status.success() {
+                        return Err(std::io::Error::other(format!(
+                            "targeted conntrack -D failed: exit={} stdout={} stderr={}",
+                            output.status,
+                            String::from_utf8_lossy(&output.stdout),
+                            String::from_utf8_lossy(&output.stderr),
+                        ))
+                        .into());
+                    }
+                    Ok(String::from_utf8_lossy(&output.stderr).into_owned())
+                })?;
+                info!(%diagnostic, "STY_TARGETED_OLD_PEER_CONNTRACK_DELETED");
             }
             if flush_nat_after_restore {
                 // An isolation control on Patchbay's simulated router, not a
@@ -533,7 +571,7 @@ async fn run_direct_relay_direct(
                 ep.network_change().await;
                 info!("STY_SAME_CONNECTION_LOCAL_NETWORK_HINT");
             }
-            if notify_replugged_local {
+            if notify_replugged_local || delete_only_stale_peer_flow {
                 sty_nat_state_snapshot(&initial, "restored_after_action");
             }
             info!(advertised = ?ep.addr(), "STY address immediately after restoring network");
@@ -582,7 +620,7 @@ async fn run_direct_relay_direct(
                     .context("STY diagnostic: checked payload after restoring network")?;
             }
             let result = conn.wait_ip(recovery).await;
-            if notify_replugged_local {
+            if notify_replugged_local || delete_only_stale_peer_flow {
                 sty_nat_state_snapshot(&initial, "after_recovery_observation");
             }
             let paths = conn
@@ -698,31 +736,31 @@ async fn run_direct_relay_direct(
 #[tokio::test]
 #[traced_test]
 async fn direct_relay_direct_client_replug() -> Result {
-    run_direct_relay_direct(Side::Client, false, false, false, false, false).await
+    run_direct_relay_direct(Side::Client, false, false, false, false, false, false).await
 }
 
 #[tokio::test]
 #[traced_test]
 async fn direct_relay_direct_server_replug() -> Result {
-    run_direct_relay_direct(Side::Server, false, false, false, false, false).await
+    run_direct_relay_direct(Side::Server, false, false, false, false, false, false).await
 }
 
 #[tokio::test]
 #[traced_test]
 async fn direct_relay_direct_server_with_traffic_probe() -> Result {
-    run_direct_relay_direct(Side::Server, true, false, false, false, false).await
+    run_direct_relay_direct(Side::Server, true, false, false, false, false, false).await
 }
 
 #[tokio::test]
 #[traced_test]
 async fn direct_relay_direct_server_with_peer_network_hint() -> Result {
-    run_direct_relay_direct(Side::Server, false, true, false, false, false).await
+    run_direct_relay_direct(Side::Server, false, true, false, false, false, false).await
 }
 
 #[tokio::test]
 #[traced_test]
 async fn direct_relay_direct_server_fresh_connection_control() -> Result {
-    run_direct_relay_direct(Side::Server, false, false, true, false, false).await
+    run_direct_relay_direct(Side::Server, false, false, true, false, false, false).await
 }
 
 // Separate from the nine historical A/B scenarios, which all retain their
@@ -731,19 +769,27 @@ async fn direct_relay_direct_server_fresh_connection_control() -> Result {
 #[tokio::test]
 #[traced_test]
 async fn sty_nat_restore_same_connection_flush_only() -> Result {
-    run_direct_relay_direct(Side::Server, false, false, false, true, false).await
+    run_direct_relay_direct(Side::Server, false, false, false, true, false, false).await
 }
 
 #[tokio::test]
 #[traced_test]
 async fn sty_nat_restore_same_connection_local_network_hint_only() -> Result {
-    run_direct_relay_direct(Side::Server, false, false, false, false, true).await
+    run_direct_relay_direct(Side::Server, false, false, false, false, true, false).await
 }
 
 #[tokio::test]
 #[traced_test]
 async fn sty_nat_restore_same_connection_flush_and_local_network_hint() -> Result {
-    run_direct_relay_direct(Side::Server, false, false, false, true, true).await
+    run_direct_relay_direct(Side::Server, false, false, false, true, true, false).await
+}
+
+// Targeted experiment: delete ONLY the old source's direct-peer conntrack
+// entry, leaving DNS/relay conntrack and the nft fullcone map untouched.
+#[tokio::test]
+#[traced_test]
+async fn sty_nat_restore_same_connection_targeted_old_peer_flow() -> Result {
+    run_direct_relay_direct(Side::Server, false, false, false, false, false, true).await
 }
 
 /// STY-RN-5 isolation control: after the *server* moves through an UDP-blocked
