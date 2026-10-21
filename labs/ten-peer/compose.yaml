@@ -1,0 +1,65 @@
+name: akula-ten-peer
+
+x-peer: &peer
+  image: akula-roha-ten-peer:local
+  build:
+    context: ../..
+    dockerfile: labs/ten-peer/Dockerfile
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  networks: [mesh]
+  healthcheck:
+    test: ["CMD", "/app/lab", "id"]
+    interval: 2s
+    timeout: 2s
+    retries: 30
+
+services:
+  peer01:
+    <<: *peer
+    volumes: [peer01-data:/state]
+  peer02:
+    <<: *peer
+    volumes: [peer02-data:/state]
+  peer03:
+    <<: *peer
+    volumes: [peer03-data:/state]
+  peer04:
+    <<: *peer
+    volumes: [peer04-data:/state]
+  peer05:
+    <<: *peer
+    volumes: [peer05-data:/state]
+  peer06:
+    <<: *peer
+    volumes: [peer06-data:/state]
+  peer07:
+    <<: *peer
+    volumes: [peer07-data:/state]
+  peer08:
+    <<: *peer
+    volumes: [peer08-data:/state]
+  peer09:
+    <<: *peer
+    volumes: [peer09-data:/state]
+  peer10:
+    <<: *peer
+    volumes: [peer10-data:/state]
+
+networks:
+  mesh:
+    internal: true
+
+volumes:
+  peer01-data:
+  peer02-data:
+  peer03-data:
+  peer04-data:
+  peer05-data:
+  peer06-data:
+  peer07-data:
+  peer08-data:
+  peer09-data:
+  peer10-data:
