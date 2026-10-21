@@ -78,6 +78,14 @@ def only_unavailable_self_hosted_jobs(run_id: int) -> bool:
 
 
 def choose_reason(run: dict, open_sha: set[str], main_sha: str, default: str) -> str | None:
+    # Cleanup workflows depend on running *after* their PR is merged or main
+    # advances. Pruning such runs destroys their reason for existing.
+    # Match trusted workflow paths, not names supplied by PR authors.
+    if run.get("path") in {
+        ".github/workflows/branch-hygiene.yml",
+        ".github/workflows/archive-verified-legacy-branches.yml",
+    }:
+        return None
     event = run.get("event")
     branch = run.get("head_branch")
     sha = run.get("head_sha")
