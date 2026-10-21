@@ -1,0 +1,135 @@
+# Native protected-branch auto-merge enrollment; executes ONLY trusted base code.
+# workflow_run is used instead of pull_request_target to avoid privileged PR checkouts.
+# Does NOT merge by API directly, disable branch protection, or run PR code.
+name: Auto-merge enrollment
+
+on:
+  workflow_run: # zizmor: ignore[dangerous-triggers] trusted default-branch only; no PR checkout/execution; exact-SHA, author and enforced-ruleset gates
+    workflows: [CI, workflow lint, Workflow Lint]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auto-merge-enroll-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  enroll:
+    name: Enroll ready internal PR (squash)
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Read current PR and enforced ruleset, then arm GitHub auto-merge
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          RULESET_ID: '25551546'
+          EXPECTED_CHECKS: 'Checking fmt|cargo deny|zizmor|Rust 1.91 - check, unit tests|Patchbay Tests|CI Test Suite / Tests (windows-latest, stable, default, x86_64-pc-windows-msvc)'
+        run: |
+          set -euo pipefail
+
+          # A privileged workflow must not checkout or run any PR content.
+          # The workflow_run SHA is only a lookup key; current API state is authoritative.
+          metadata="$(gh api "repos/$REPO")"
+          if [[ "$(jq -r '.allow_auto_merge' <<< "$metadata")" != true ]]; then
+            echo "Repository native auto-merge is disabled; skip"
+            exit 0
+          fi
+          ruleset="$(gh api "repos/$REPO/rulesets/$RULESET_ID")"
+          if ! jq -e '
+            .enforcement == "active" and .target == "branch" and
+            (.conditions.ref_name.include | index("~DEFAULT_BRANCH") != null) and
+            any(.rules[]; .type == "pull_request") and
+            any(.rules[]; .type == "deletion") and
+            any(.rules[]; .type == "non_fast_forward") and
+            any(.rules[]; .type == "required_status_checks" and
+              ((.parameters.required_status_checks | length) >= 6))
+          ' <<< "$ruleset" >/dev/null; then
+            echo "::error::Main ruleset is missing required fail-closed protections"
+            exit 1
+          fi
+          IFS='|' read -r -a required_checks <<< "$EXPECTED_CHECKS"
+          for check in "${required_checks[@]}"; do
+            if ! jq -e --arg check "$check" '
+              any(.rules[]; .type == "required_status_checks" and
+                any(.parameters.required_status_checks[]; .context == $check))
+            ' <<< "$ruleset" >/dev/null; then
+              echo "::error::Ruleset no longer requires $check"
+              exit 1
+            fi
+          done
+
+          # Pagination covers stacked PRs and orphan checks beyond page 1.
+          prs="$(gh api --paginate "repos/$REPO/pulls?state=open&per_page=100" | jq -cs 'add')"
+          matching="$(jq -c --arg sha "$RUN_SHA" --arg repo "$REPO" '
+            [.[] | select(.head.sha == $sha and .head.repo.full_name == $repo)]
+          ' <<< "$prs")"
+          if [[ "$(jq 'length' <<< "$matching")" != 1 ]]; then
+            echo "No unique open PR matching exact CI head SHA; skip"
+            exit 0
+          fi
+          pr="$(jq -c '.[0]' <<< "$matching")"
+          number="$(jq -r '.number' <<< "$pr")"
+          head_ref="$(jq -r '.head.ref' <<< "$pr")"
+          author="$(jq -r '.user.login' <<< "$pr")"
+          if [[ "$(jq -r '.base.ref' <<< "$pr")" != main ]] ||
+             [[ "$(jq -r '.draft' <<< "$pr")" != false ]]; then
+            echo "Not a ready PR into main; skip"
+            exit 0
+          fi
+          case "$author" in
+            calex794|Lalalalendia) ;;
+            *) echo "Unapproved PR author; skip"; exit 0 ;;
+          esac
+          # Research/stack/repro PRs are NOT promoted by this automation.
+          case "$head_ref" in
+            fix/*|feature/*|feat/*|chore/*|ci/*|ops/*|docs/*|refactor/*|test/*) ;;
+            *) echo "Non-release or experiment branch; skip"; exit 0 ;;
+          esac
+          if jq -e '
+            [.labels[].name] | any(. == "hold" or . == "blocked" or
+              . == "flaky-test" or . == "skip-ci" or . == "manual-review" or
+              . == "manual-merge" or . == "do-not-merge" or . == "no-auto-merge" or
+              . == "security-review" or . == "needs-review")
+          ' <<< "$pr" >/dev/null; then
+            echo "PR has a hold/manual CI label; skip"
+            exit 0
+          fi
+          if jq -e --arg branch "$head_ref" --argjson pr "$number" '
+            any(.[]; .base.ref == $branch and .number != $pr)
+          ' <<< "$prs" >/dev/null; then
+            echo "Open stacked PR depends on this branch; skip"
+            exit 0
+          fi
+          # Guard against HEAD/base/draft changes between list and enrollment.
+          live="$(gh api "repos/$REPO/pulls/$number")"
+          if [[ "$(jq -r '.head.sha' <<< "$live")" != "$RUN_SHA" ]] ||
+             [[ "$(jq -r '.base.ref' <<< "$live")" != main ]] ||
+             [[ "$(jq -r '.draft' <<< "$live")" != false ]]; then
+            echo "PR changed since the CI run; refuse enrollment"
+            exit 0
+          fi
+          if [[ "$(jq -r '.mergeable' <<< "$live")" == false ]]; then
+            echo "PR has a merge conflict; cannot enroll"
+            exit 0
+          fi
+          if [[ "$(jq -r '.auto_merge != null' <<< "$live")" == true ]]; then
+            echo "GitHub native auto-merge is already armed for PR #$number"
+            exit 0
+          fi
+
+          # ONLY enrollment; GitHub protection checks decide when to merge.
+          gh pr merge "$number" --repo "$REPO" --auto --squash
+          echo "Enrolled #$number for native SQUASH auto-merge on exact SHA $RUN_SHA"
+          echo "PR #$number enrolled for protected squash auto-merge." >> "$GITHUB_STEP_SUMMARY"

@@ -7,17 +7,17 @@
 #   pick-runner queries self-hosted linux X64 idle count once at dispatch
 #   time, then emits up to 16 per-slot runs-on arrays (`overflow_1` through
 #   `overflow_16`). Each caller job picks a slot number; the first `idle`
-#   slots resolve to self-hosted, the rest resolve to Blacksmith-4vcpu.
+#   slots resolve to self-hosted; the rest use GitHub-hosted runners.
 #
 #   Example, with idle=2 and 5 overflow jobs (slots 1..5):
 #     slot 1 → self-hosted       (1 <= 2)
 #     slot 2 → self-hosted       (2 <= 2)
-#     slot 3 → Blacksmith        (3 > 2)
-#     slot 4 → Blacksmith
-#     slot 5 → Blacksmith
+#     slot 3 → GitHub-hosted    (3 > 2)
+#     slot 4 → GitHub-hosted
+#     slot 5 → GitHub-hosted
 #
 #   MIN_FREE_RUNNERS acts as a quality gate: if idle < min_free_runners, we
-#   don't spread at all and send the whole batch to Blacksmith. This avoids
+#   don't spread at all and send the batch to GitHub-hosted. This avoids
 #   stranding a single job on a nearly-full self-hosted pool where the batch
 #   wall-clock would be dominated by that one job's queue wait.
 #
@@ -56,7 +56,7 @@
 #          aren't available — note `read:org` alone is NOT sufficient for
 #          this endpoint, despite the name).
 #        - GitHub App: Organization permissions → Self-hosted runners: Read.
-#      Without the secret, pick-runner falls back to all-self-hosted (safe).
+#      Without the secret, pick-runner falls back to GitHub-hosted runners.
 
 name: Pick runner (reusable, per-slot)
 
@@ -83,9 +83,9 @@ on:
         type: string
         default: '["self-hosted","linux","X64"]'
       overflow_runner:
-        description: JSON array for overflow slots that land on Blacksmith
+        description: JSON array for overflow slots using GitHub-hosted fallback
         type: string
-        default: '["blacksmith-4vcpu-ubuntu-2204"]'
+        default: '["ubuntu-latest"]'
       blacksmith_busy_match:
         description: >
           Substring a busy Blacksmith runner's labels must contain to count
@@ -95,10 +95,9 @@ on:
         default: ubuntu
       max_blacksmith_concurrent:
         description: >
-          Soft cap on total Blacksmith runners busy across the org. If the
-          current busy count is >= this value, this batch is forced to
-          self-hosted regardless of idle count. Prevents unbounded overflow
-          spend when multiple repos spill simultaneously. Set to 0 to disable.
+          Legacy Blacksmith saturation threshold. If reached, overflow
+          jobs use GitHub-hosted runners rather than the self-hosted queue.
+          Set to 0 to disable this legacy threshold.
         type: number
         default: 10
     outputs:
@@ -232,25 +231,25 @@ jobs:
 
           # Decide how many slots get self-hosted.
           #
-          #   API failed              -> all self-hosted (safe default)
-          #   blacksmith at cap       -> all self-hosted (prevent runaway spend)
-          #   idle < min threshold    -> all Blacksmith (don't strand jobs)
-          #   idle >= min threshold   -> first `idle` slots self-hosted, rest Blacksmith
+          #   API failed              -> all GitHub-hosted (no stale self-hosted guess)
+          #   Blacksmith at cap       -> all GitHub-hosted (avoid extra queue)
+          #   idle < min threshold    -> all GitHub-hosted (don't strand jobs)
+          #   idle >= min threshold   -> first `idle` slots self-hosted, rest hosted
           if [[ -z "$IDLE" || ! "$IDLE" =~ ^[0-9]+$ ]]; then
-            echo "::warning::runner availability query failed; defaulting to all self-hosted"
+            echo "::warning::runner availability query failed; using GitHub-hosted fallback"
             IDLE="unknown"
             BS_BUSY="unknown"
-            SELF_HOSTED_SLOTS=16
-            ROUTE="all self-hosted (api-failed)"
+            SELF_HOSTED_SLOTS=0
+            ROUTE="all GitHub-hosted (availability-api-failed)"
           elif (( MAX_BLACKSMITH_CONCURRENT > 0 )) && [[ "$BS_BUSY" =~ ^[0-9]+$ ]] && (( BS_BUSY >= MAX_BLACKSMITH_CONCURRENT )); then
-            SELF_HOSTED_SLOTS=16
-            ROUTE="all self-hosted (blacksmith at cap: bs_busy=${BS_BUSY} >= max=${MAX_BLACKSMITH_CONCURRENT})"
+            SELF_HOSTED_SLOTS=0
+            ROUTE="all GitHub-hosted (legacy-blacksmith-cap: bs_busy=${BS_BUSY} >= max=${MAX_BLACKSMITH_CONCURRENT})"
           elif (( IDLE < MIN_FREE_RUNNERS )); then
             SELF_HOSTED_SLOTS=0
-            ROUTE="all Blacksmith (idle=${IDLE} < min=${MIN_FREE_RUNNERS})"
+            ROUTE="all GitHub-hosted (idle=${IDLE} < min=${MIN_FREE_RUNNERS})"
           else
             SELF_HOSTED_SLOTS="$IDLE"
-            ROUTE="spread (idle=${IDLE}: first ${IDLE} slots self-hosted, rest Blacksmith)"
+            ROUTE="spread (idle=${IDLE}: first ${IDLE} slots self-hosted, rest GitHub-hosted)"
           fi
 
           for i in $(seq 1 16); do
@@ -268,6 +267,6 @@ jobs:
           echo "Idle self-hosted linux-X64: ${IDLE}  (min threshold: ${MIN_FREE_RUNNERS})"
           echo "Blacksmith runners busy:    ${BS_BUSY}  (max: ${MAX_BLACKSMITH_CONCURRENT})"
           echo "Self-hosted slots:          1..${SELF_HOSTED_SLOTS}"
-          echo "Blacksmith slots:           $((SELF_HOSTED_SLOTS+1))..16"
+          echo "GitHub-hosted slots:        $((SELF_HOSTED_SLOTS+1))..16"
           echo "Decision: ${ROUTE}"
           echo "--------------------------------------------------------"
