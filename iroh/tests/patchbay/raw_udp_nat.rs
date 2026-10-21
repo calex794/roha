@@ -33,6 +33,8 @@ enum E03Case {
     ReplugBurstDeleteOldPeer,
     ReplugOnlyOldPeer,
     ReplugOnlyOldPeerBurst,
+    ReplugOnlyOldPeerTargeted,
+    ReplugOnlyOldPeerBurstTargeted,
 }
 
 /// Reflect the observed external UDP source address and report it out-of-band.
@@ -292,7 +294,10 @@ async fn run_e03(case: E03Case) -> Result<()> {
     let old_peer = observed(&cmd_tx, &mut event_rx, peer_addr, "OLD_PEER").await?;
     let only_old_peer = matches!(
         case,
-        E03Case::ReplugOnlyOldPeer | E03Case::ReplugOnlyOldPeerBurst
+        E03Case::ReplugOnlyOldPeer
+            | E03Case::ReplugOnlyOldPeerBurst
+            | E03Case::ReplugOnlyOldPeerTargeted
+            | E03Case::ReplugOnlyOldPeerBurstTargeted
     );
     let old_discovery = if only_old_peer {
         None
@@ -344,7 +349,10 @@ async fn run_e03(case: E03Case) -> Result<()> {
     }
     if matches!(
         case,
-        E03Case::ReplugDeleteOldPeer | E03Case::ReplugBurstDeleteOldPeer
+        E03Case::ReplugDeleteOldPeer
+            | E03Case::ReplugBurstDeleteOldPeer
+            | E03Case::ReplugOnlyOldPeerTargeted
+            | E03Case::ReplugOnlyOldPeerBurstTargeted
     ) {
         delete_exact_old_peer(&initial, initial_private, local_port, peer_addr)?;
     }
@@ -357,6 +365,7 @@ async fn run_e03(case: E03Case) -> Result<()> {
         E03Case::ReplugBurstStale
             | E03Case::ReplugBurstDeleteOldPeer
             | E03Case::ReplugOnlyOldPeerBurst
+            | E03Case::ReplugOnlyOldPeerBurstTargeted
     ) {
         burst_observed(&cmd_tx, &mut event_rx, discovery_addr, peer_addr).await?
     } else {
@@ -416,7 +425,11 @@ async fn run_e03(case: E03Case) -> Result<()> {
     // a required PASS: mapping equality vs divergence is the actual result.
     if matches!(
         case,
-        E03Case::NoReplug | E03Case::ReplugDeleteOldPeer | E03Case::ReplugBurstDeleteOldPeer
+        E03Case::NoReplug
+            | E03Case::ReplugDeleteOldPeer
+            | E03Case::ReplugBurstDeleteOldPeer
+            | E03Case::ReplugOnlyOldPeerTargeted
+            | E03Case::ReplugOnlyOldPeerBurstTargeted
     ) {
         ensure_any!(
             received_peer,
@@ -478,4 +491,16 @@ async fn sty_e03c_raw_udp_only_old_peer_sequential() -> Result<()> {
 #[traced_test]
 async fn sty_e03c_raw_udp_only_old_peer_burst() -> Result<()> {
     run_e03(E03Case::ReplugOnlyOldPeerBurst).await
+}
+
+#[tokio::test]
+#[traced_test]
+async fn sty_e03c_raw_udp_only_old_peer_targeted_delete() -> Result<()> {
+    run_e03(E03Case::ReplugOnlyOldPeerTargeted).await
+}
+
+#[tokio::test]
+#[traced_test]
+async fn sty_e03c_raw_udp_only_old_peer_burst_targeted_delete() -> Result<()> {
+    run_e03(E03Case::ReplugOnlyOldPeerBurstTargeted).await
 }
