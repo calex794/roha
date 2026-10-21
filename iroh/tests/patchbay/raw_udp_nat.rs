@@ -31,6 +31,8 @@ enum E03Case {
     ReplugDeleteOldPeer,
     ReplugBurstStale,
     ReplugBurstDeleteOldPeer,
+    ReplugOnlyOldPeer,
+    ReplugOnlyOldPeerBurst,
 }
 
 /// Reflect the observed external UDP source address and report it out-of-band.
@@ -184,6 +186,44 @@ fn delete_exact_old_peer(
     Ok(())
 }
 
+/// Read-only E03 snapshot proving whether the old peer UDP conntrack flow
+/// persists across replug. This never changes host or router configuration.
+fn e03_old_peer_conntrack_present(
+    router: &Router,
+    old_private: Ipv4Addr,
+    local_port: u16,
+    peer_addr: SocketAddr,
+    stage: &'static str,
+) -> Result<bool> {
+    let snapshot = router.run_sync(|| {
+        let output = std::process::Command::new("conntrack")
+            .args(["-L", "-p", "udp", "-o", "extended"])
+            .output()?;
+        if !output.status.success() {
+            return Err(std::io::Error::other(format!(
+                "E03 conntrack snapshot failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    })?;
+    let prefix = format!(
+        "src={old_private} dst={} sport={local_port} dport={}",
+        peer_addr.ip(),
+        peer_addr.port()
+    );
+    let old_peer_present = snapshot.lines().any(|line| line.contains(&prefix));
+    info!(
+        stage,
+        old_peer_present,
+        old_tuple = %prefix,
+        snapshot = %snapshot.chars().take(3000).collect::<String>(),
+        "STY_E03_OLD_PEER_CONNTRACK_SNAPSHOT"
+    );
+    Ok(old_peer_present)
+}
+
 async fn run_e03(case: E03Case) -> Result<()> {
     let (lab, guard) = Lab::for_test(testdir!()).await?;
     let initial = lab.add_router("initial").nat(Nat::Moderate).build().await?;
@@ -250,12 +290,30 @@ async fn run_e03(case: E03Case) -> Result<()> {
 
     // Establish an OLD flow to the peer and a second discovery destination.
     let old_peer = observed(&cmd_tx, &mut event_rx, peer_addr, "OLD_PEER").await?;
-    let old_discovery = observed(&cmd_tx, &mut event_rx, discovery_addr, "OLD_DISCOVERY").await?;
-    info!(?case, local_port, %initial_private, %old_peer, %old_discovery, "STY_E03_INITIAL");
-    ensure_any!(
-        old_peer == old_discovery,
-        "E03 initial home NAT mapping must be endpoint-independent"
+    let only_old_peer = matches!(
+        case,
+        E03Case::ReplugOnlyOldPeer | E03Case::ReplugOnlyOldPeerBurst
     );
+    let old_discovery = if only_old_peer {
+        None
+    } else {
+        Some(observed(&cmd_tx, &mut event_rx, discovery_addr, "OLD_DISCOVERY").await?)
+    };
+    info!(?case, local_port, %initial_private, %old_peer, ?old_discovery, "STY_E03_INITIAL");
+    if let Some(discovery) = old_discovery {
+        ensure_any!(
+            old_peer == discovery,
+            "E03 initial home NAT mapping must be endpoint-independent"
+        );
+    }
+    let old_flow_before = e03_old_peer_conntrack_present(
+        &initial,
+        initial_private,
+        local_port,
+        peer_addr,
+        "before_replug",
+    )?;
+    ensure_any!(old_flow_before, "E03 old peer conntrack tuple missing before replug");
 
     if !matches!(case, E03Case::NoReplug) {
         device.iface("eth0").unwrap().replug(blocked.id()).await?;
@@ -264,6 +322,17 @@ async fn run_e03(case: E03Case) -> Result<()> {
     let restored_private = device
         .ip()
         .ok_or_else(|| anyerr!("E03 restored private IP missing"))?;
+    let old_flow_after = e03_old_peer_conntrack_present(
+        &initial,
+        initial_private,
+        local_port,
+        peer_addr,
+        "after_replug_before_action",
+    )?;
+    ensure_any!(
+        old_flow_after,
+        "E03 old peer conntrack expired before replug observation"
+    );
     if !matches!(case, E03Case::NoReplug) {
         ensure_any!(
             initial_private != restored_private,
@@ -282,7 +351,9 @@ async fn run_e03(case: E03Case) -> Result<()> {
     // Both use the exact same original UDP socket and device replug.
     let (after_discovery, after_peer) = if matches!(
         case,
-        E03Case::ReplugBurstStale | E03Case::ReplugBurstDeleteOldPeer
+        E03Case::ReplugBurstStale
+            | E03Case::ReplugBurstDeleteOldPeer
+            | E03Case::ReplugOnlyOldPeerBurst
     ) {
         burst_observed(&cmd_tx, &mut event_rx, discovery_addr, peer_addr).await?
     } else {
@@ -392,4 +463,16 @@ async fn sty_e03b_raw_udp_burst_stale() -> Result<()> {
 #[traced_test]
 async fn sty_e03b_raw_udp_burst_targeted_delete() -> Result<()> {
     run_e03(E03Case::ReplugBurstDeleteOldPeer).await
+}
+
+#[tokio::test]
+#[traced_test]
+async fn sty_e03c_raw_udp_only_old_peer_sequential() -> Result<()> {
+    run_e03(E03Case::ReplugOnlyOldPeer).await
+}
+
+#[tokio::test]
+#[traced_test]
+async fn sty_e03c_raw_udp_only_old_peer_burst() -> Result<()> {
+    run_e03(E03Case::ReplugOnlyOldPeerBurst).await
 }
