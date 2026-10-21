@@ -1,0 +1,83 @@
+name: Explicit branch archive
+on:
+  pull_request:
+    paths:
+      - .github/workflows/branch-archive.yml
+      - .github/scripts/archive-orphan.sh
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: 'Exact orphan branch to preserve and retire'
+        required: true
+        type: string
+      expected_sha:
+        description: '40-digit immutable tip SHA for compare-and-swap'
+        required: true
+        type: string
+      mode:
+        description: 'DRY_RUN only inspects; ARCHIVE preserves tag then deletes branch'
+        required: true
+        type: choice
+        options:
+          - DRY_RUN
+          - ARCHIVE
+        default: DRY_RUN
+      confirmation:
+        description: 'Type ARCHIVE to confirm destructive mode'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: explicit-archive-${{ github.repository }}-${{ inputs.target_branch || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  validate-script:
+    name: Validate archive helper
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout unprivileged PR
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Shell syntax
+        run: bash -n .github/scripts/archive-orphan.sh
+      - name: ShellCheck
+        run: |
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck -S warning .github/scripts/archive-orphan.sh
+          else
+            echo "::warning::shellcheck unavailable; bash -n completed"
+          fi
+
+  archive:
+    name: Explicit archive or dry-run
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - name: Checkout only trusted default branch
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Verify and process explicit ref
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          MODE: ${{ inputs.mode }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: bash .github/scripts/archive-orphan.sh
