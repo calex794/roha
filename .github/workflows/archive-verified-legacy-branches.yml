@@ -1,0 +1,102 @@
+# Single-run historical cleanup. Fires only when this workflow first lands on main.
+# Keep a manual re-run option; no experimental branch is deleted without a proof.
+name: Archive verified legacy branches
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/archive-verified-legacy-branches.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: verified-legacy-archive-${{ github.repository }}
+  cancel-in-progress: false
+jobs:
+  archive:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - name: Checkout trusted main
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Verify merged or ancestor provenance then tag and retire branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          failures=0
+          processed=0
+          archive_one() {
+            local kind="$1" branch="$2" expected="$3" witness="$4"
+            local current proof keeper_sha comparison
+            current="$(gh api "repos/${REPO}/git/ref/heads/${branch}" --jq '.object.sha' 2>/dev/null || true)"
+            if [[ -z "$current" ]]; then echo "Already absent: $branch"; return 0; fi
+            if [[ "$current" != "$expected" ]]; then
+              echo "::warning::Ref moved since audit: $branch, refusing archival"
+              return 1
+            fi
+            if [[ "$kind" == "merged" ]]; then
+              if ! proof="$(gh api "repos/${REPO}/pulls/${witness}")"; then return 1; fi
+              if ! jq -e --arg branch "$branch" --arg sha "$expected" --arg repo "$REPO" '
+                .merged_at != null and .base.ref == "main" and
+                .head.ref == $branch and .head.sha == $sha and
+                .head.repo.full_name == $repo
+              ' <<< "$proof" >/dev/null; then
+                echo "::error::Merge provenance no longer matches: $branch / PR $witness"
+                return 1
+              fi
+            elif [[ "$kind" == "ancestor" ]]; then
+              keeper_sha="$(gh api "repos/${REPO}/git/ref/heads/${witness}" --jq '.object.sha' 2>/dev/null || true)"
+              if [[ -z "$keeper_sha" ]]; then echo "::error::Keeper ref unavailable: $witness"; return 1; fi
+              if ! comparison="$(gh api "repos/${REPO}/compare/${expected}...${keeper_sha}")"; then return 1; fi
+              if ! jq -e '(.behind_by == 0) and (.status == "ahead" or .status == "identical")' <<< "$comparison" >/dev/null; then
+                echo "::error::Branch is no longer contained in keeper: $branch -> $witness"
+                return 1
+              fi
+            else
+              echo "::error::Invalid archival proof type $kind"
+              return 1
+            fi
+            # archive_one is invoked in an if-condition. Bash disables errexit
+            # inside such functions, so propagate archive failures explicitly.
+            TARGET_BRANCH="$branch" EXPECTED_SHA="$expected" MODE="ARCHIVE" CONFIRMATION="ARCHIVE" \
+              bash .github/scripts/archive-orphan.sh || return 1
+            echo "Archived $branch with proof $kind / $witness"
+          }
+          while IFS='|' read -r kind branch expected witness; do
+            [[ -n "$kind" ]] || continue
+            if archive_one "$kind" "$branch" "$expected" "$witness"; then
+              processed=$((processed + 1))
+            else
+              failures=$((failures + 1))
+            fi
+          done <<'VERIFIED_BRANCHES'
+          merged|ci/auto-merge-enroll-20261021|d76d05097e28a4a3395e84722f98cc0e208c43a8|24
+          merged|ci/remove-selfhosted-backlog-20261021|b0e9df28fc0fc7bca1809db74c042ca18ce6c8fd|25
+          merged|integration/roha-security-after-baseline-20261021|4ba65403afba3d53bb95803c0dac470bdbdbdd2f|18
+          merged|lab/baseline-20261018|22264f85842a90467063de20bf5c53a37a250f9f|15
+          merged|ops/branch-hygiene-20261021|299d775ad5fa00c61aa17d905f6bd1988362d2b2|21
+          ancestor|fix/ftr40-iroh14-queue-cap-20261021|be3db23a544d0058b91bee9b2cedc15ab7cfd137|integration/iroh-1-4-upstream-20261021
+          ancestor|integration/iroh-1-4-merged-main-20261021|1ee15e95ef2c0f81f6483d08b2fc8583a620d7b6|integration/iroh-1-4-upstream-20261021
+          ancestor|lab/staya-home-relay-4616-repro-20261019|b09f753bd5c6865618de15b2d5e417eb59a6e498|lab/staya-home-relay-4616-fix-20261019
+          ancestor|lab/staya-relay-strict-tls-20261019|2ef1faf72eef98dc4496527a85ce91fcd82b07b2|lab/staya-relay-backend-restart-20261019
+          ancestor|lab/staya-relay-tls-churn-20261019|8dee11dd0a875f865abde01dfc0a7edddf003603|lab/staya-relay-tls-parallel-20261019
+          ancestor|lab/staya-relay-4616-4617-clean-20261019|97ebb3e427a27fb3962a340f6ed22821f6df1c54|lab/staya-relay-prefix-nginx-e2e-20261019
+          ancestor|lab/staya-relay-prefix-nginx-e2e-20261019|286b0f7a1235861593c781e82ceabdb1240d651c|lab/staya-relay-forwarding-e2e-20261019
+          ancestor|lab/staya-relay-forwarding-e2e-20261019|583247a23098318ef86fa04b1d587170136214bf|lab/staya-relay-reconnect-e2e-20261019
+          ancestor|lab/staya-relay-reconnect-e2e-20261019|9f9a99c415c3fff4d353f20c9f0dc8799f9a7cf0|lab/staya-relay-backend-restart-20261019
+          ancestor|repro/iroh-4588-lan-address|cea4994336992b9a0b65fd97273327e9ddcfc664|fix/iroh-4588-lan-address
+          ancestor|repro/iroh-4600-stale-selected-path|6fc4324399f397c97994c0cd445b436e58499284|fix/iroh-4600-stale-selected-path
+          VERIFIED_BRANCHES
+          echo "Verified entries: $processed; failures: $failures" >> "$GITHUB_STEP_SUMMARY"
+          if (( failures > 0 )); then exit 1; fi
