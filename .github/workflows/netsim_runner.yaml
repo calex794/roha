@@ -163,8 +163,10 @@ jobs:
         # The upstream setup installs pip packages for the runner user, whereas
         # Mininet simulations run as root. Use the same isolated Python for both.
         python3 -m venv --system-site-packages "$RUNNER_TEMP/netsim-venv"
-        "$RUNNER_TEMP/netsim-venv/bin/python" -m pip install --disable-pip-version-check -r scripts/requirements.txt
-        sudo "$RUNNER_TEMP/netsim-venv/bin/python" -c 'import humanfriendly, pyshark, mininet'
+        # Do not accept the runner user's ~/.local packages as satisfying
+        # requirements: sudo runs as root and cannot import that user site.
+        PYTHONNOUSERSITE=1 "$RUNNER_TEMP/netsim-venv/bin/python" -m pip install --disable-pip-version-check -r scripts/requirements.txt
+        sudo env PYTHONNOUSERSITE=1 "$RUNNER_TEMP/netsim-venv/bin/python" -c 'import humanfriendly, pyshark, mininet'
 
     - name: Copy sim configs
       run: |
