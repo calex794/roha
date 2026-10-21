@@ -1,0 +1,68 @@
+name: Staya Roha 1.4 NAT isolation
+
+on:
+  pull_request:
+    paths:
+      - "iroh/tests/patchbay/relay.rs"
+      - ".github/workflows/staya-iroh14-nat-isolation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staya-iroh14-nat-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  existing-session-nat-matrix:
+    name: Existing QUIC session - NAT flush vs endpoint hint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      RUST_BACKTRACE: "1"
+      RUST_LOG: "info,iroh::socket=debug,iroh::socket::remote_map::remote_state=trace,noq_proto::n0_nat_traversal=trace"
+    steps:
+      - name: Checkout full candidate history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+      - name: Check Iroh v1.4 base and production transport unchanged
+        run: |
+          git merge-base --is-ancestor 55908a5809b61c72ec8deeff024038f4a9d68ab7 HEAD
+          git diff --exit-code 55908a5809b61c72ec8deeff024038f4a9d68ab7 HEAD -- Cargo.lock iroh/src
+      - name: Install NAT tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y conntrack
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          unshare --user --map-root-user true
+      - name: Run existing-session controls separately and preserve all results
+        shell: bash
+        run: |
+          set -uo pipefail
+          failed=0
+          for scenario in             sty_nat_restore_same_connection_flush_only             sty_nat_restore_same_connection_local_network_hint_only             sty_nat_restore_same_connection_flush_and_local_network_hint; do
+            echo "::group::${scenario}"
+            cargo test --locked -p iroh --test patchbay "${scenario}" -- --exact --nocapture --test-threads=1 2>&1 | tee "${RUNNER_TEMP}/${scenario}.log"
+            code=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            if [ "${code}" -ne 0 ]; then failed=1; fi
+            printf '%s=%s\n' "${scenario}" "${code}" | tee -a "${RUNNER_TEMP}/nat-matrix-results.txt"
+          done
+          exit "${failed}"
+      - name: Preserve evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: staya-iroh14-nat-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/sty_nat_restore_same_connection_*.log
+            ${{ runner.temp }}/nat-matrix-results.txt
+          retention-days: 7
+          if-no-files-found: ignore
