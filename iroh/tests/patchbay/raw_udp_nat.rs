@@ -313,7 +313,10 @@ async fn run_e03(case: E03Case) -> Result<()> {
         peer_addr,
         "before_replug",
     )?;
-    ensure_any!(old_flow_before, "E03 old peer conntrack tuple missing before replug");
+    ensure_any!(
+        old_flow_before,
+        "E03 old peer conntrack tuple missing before replug"
+    );
 
     if !matches!(case, E03Case::NoReplug) {
         device.iface("eth0").unwrap().replug(blocked.id()).await?;
