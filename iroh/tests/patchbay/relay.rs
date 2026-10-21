@@ -554,6 +554,124 @@ fn sty_delete_one_old_flow(
     Ok(())
 }
 
+/// E02 captures packet evidence in the INITIAL virtual router only.
+/// Its non-verdict-changing nftrace rules are isolated to this test namespace.
+struct StyE02Trace {
+    children: Vec<(String, std::process::Child)>,
+    directory: std::path::PathBuf,
+}
+
+impl Drop for StyE02Trace {
+    fn drop(&mut self) {
+        for (_, child) in &mut self.children {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+impl StyE02Trace {
+    fn finish(mut self) -> Result {
+        for (_, child) in &mut self.children {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        for label in ["nft_trace", "conntrack_events", "tcpdump_text"] {
+            let path = self.directory.join(format!("{label}.stdout"));
+            let trace = std::fs::read_to_string(&path)?;
+            let sample = trace.chars().take(12_000).collect::<String>();
+            info!(
+                label,
+                file = %path.display(),
+                bytes = trace.len(),
+                sample = %sample,
+                "STY_E02_TRACE_EVIDENCE"
+            );
+        }
+        let pcap = self.directory.join("tcpdump_pcap.pcap");
+        let pcap_bytes = std::fs::metadata(&pcap)?.len();
+        info!(
+            directory = %self.directory.display(),
+            pcap_bytes,
+            "STY_E02_PACKET_TRACE_DONE"
+        );
+        Ok(())
+    }
+}
+
+/// Instrument both original and translated direct UDP traffic in the router.
+/// This is restricted to the peer's external IP, not all runner network flows.
+fn sty_e02_start_trace(
+    router: &patchbay::Router,
+    peer_wan: std::net::Ipv4Addr,
+) -> Result<StyE02Trace> {
+    let rules = format!(
+        "add table inet sty_e02\n\
+         add chain inet sty_e02 pre {{ type filter hook prerouting priority -301; policy accept; }}\n\
+         add rule inet sty_e02 pre ip daddr {peer_wan} meta l4proto udp meta nftrace set 1\n\
+         add rule inet sty_e02 pre ip saddr {peer_wan} meta l4proto udp meta nftrace set 1\n"
+    );
+    router.run_sync(move || {
+        use std::io::Write as _;
+        let mut command = std::process::Command::new("nft")
+            .args(["-f", "-"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        command.stdin.take().unwrap().write_all(rules.as_bytes())?;
+        let output = command.wait_with_output()?;
+        if !output.status.success() {
+            return Err(std::io::Error::other(format!(
+                "E02 nftrace setup failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .into());
+        }
+        Ok(())
+    })?;
+
+    let root = std::env::var_os("RUNNER_TEMP")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let directory = root.join(format!("staya-e02-{}", std::process::id()));
+    std::fs::create_dir_all(&directory)?;
+    let mut children = Vec::new();
+    let observers: [(&str, &str, &[&str]); 4] = [
+        ("nft_trace", "nft", &["monitor", "trace"]),
+        ("conntrack_events", "conntrack", &["-E", "-p", "udp", "-o", "timestamp"]),
+        ("tcpdump_text", "tcpdump", &["-i", "any", "-nn", "-tt", "-l", "-s", "160", "udp"]),
+        (
+            "tcpdump_pcap",
+            "tcpdump",
+            &["-i", "any", "-nn", "-U", "-s", "160", "-w", "PLACEHOLDER", "udp"],
+        ),
+    ];
+    for (label, program, args) in observers {
+        let out = directory.join(format!("{label}.stdout"));
+        let err = directory.join(format!("{label}.stderr"));
+        let mut command = std::process::Command::new(program);
+        if label == "tcpdump_pcap" {
+            let pcap = directory.join("tcpdump_pcap.pcap");
+            command.args(["-i", "any", "-nn", "-U", "-s", "160", "-w"]);
+            command.arg(pcap).arg("udp");
+        } else {
+            command.args(args);
+        }
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::from(std::fs::File::create(out)?))
+            .stderr(std::process::Stdio::from(std::fs::File::create(err)?));
+        let child = router.spawn_command_sync(command)?;
+        children.push((label.to_owned(), child));
+    }
+    info!(directory = %directory.display(), "STY_E02_PACKET_TRACE_ARMED");
+    Ok(StyE02Trace {
+        children,
+        directory,
+    })
+}
+
 /// STY-RN-5: change an established direct path into a relay-only path without
 /// closing the QUIC connection, then restore a direct path on the same session.
 ///
@@ -633,6 +751,13 @@ async fn run_direct_relay_direct(
                 .await
                 .context("STY relay: byte-for-byte payload")?;
 
+            let mut e02_trace = if std::env::var_os("STY_E02_PACKET_TRACE").is_some() {
+                let trace = sty_e02_start_trace(&initial, peer_wan_ip)?;
+                tokio::time::sleep(Duration::from_millis(120)).await;
+                Some(trace)
+            } else {
+                None
+            };
             dev.iface("eth0").unwrap().replug(initial.id()).await?;
             if notify_replugged_local || !matches!(flow_deletion, StyFlowDeletion::None) {
                 sty_nat_state_snapshot(&initial, "restored_before_any_flush");
@@ -707,6 +832,9 @@ async fn run_direct_relay_direct(
                     .context("STY diagnostic: checked payload after restoring network")?;
             }
             let result = conn.wait_ip(recovery).await;
+            if let Some(trace) = e02_trace.take() {
+                trace.finish()?;
+            }
             if notify_replugged_local || !matches!(flow_deletion, StyFlowDeletion::None) {
                 sty_nat_state_snapshot(&initial, "after_recovery_observation");
             }
