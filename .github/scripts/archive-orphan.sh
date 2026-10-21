@@ -57,7 +57,9 @@ fi
 check_open_pr_dependencies
 
 archive_tag="archive/${TARGET_BRANCH}/${EXPECTED_SHA:0:12}"
-existing="$(gh api "repos/${REPO}/git/ref/tags/${archive_tag}" --jq '.object.sha' 2>/dev/null || true)"
+# GitHub may return a JSON 404 with no .object.sha; the jq value "null" is
+# not a valid existing tag. Suppress it so missing tags can be created.
+existing="$(gh api "repos/${REPO}/git/ref/tags/${archive_tag}" --jq '.object.sha // empty' 2>/dev/null || true)"
 if [[ -n "${existing}" && "${existing}" != "${EXPECTED_SHA}" ]]; then
   echo "::error::Archive tag already exists with a different commit"
   exit 1
