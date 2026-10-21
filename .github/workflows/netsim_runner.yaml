@@ -160,6 +160,11 @@ jobs:
         sudo apt update
         ./setup.sh
         ./cleanup.sh || true
+        # The upstream setup installs pip packages for the runner user, whereas
+        # Mininet simulations run as root. Use the same isolated Python for both.
+        python3 -m venv --system-site-packages "$RUNNER_TEMP/netsim-venv"
+        "$RUNNER_TEMP/netsim-venv/bin/python" -m pip install --disable-pip-version-check -r scripts/requirements.txt
+        sudo "$RUNNER_TEMP/netsim-venv/bin/python" -c 'import humanfriendly, pyshark, mininet'
 
     - name: Copy sim configs
       run: |
@@ -204,9 +209,9 @@ jobs:
         fi
         for sim_path in "${sim_paths[@]}"; do
           if [[ -n "$RUST_LOG_INPUT" ]]; then
-            sudo RUST_LOG="$RUST_LOG_INPUT" python3 main.py ${filter_flag} --max-workers="$MAX_WORKERS" --integration "$sim_path"
+            sudo RUST_LOG="$RUST_LOG_INPUT" "$RUNNER_TEMP/netsim-venv/bin/python" main.py ${filter_flag} --max-workers="$MAX_WORKERS" --integration "$sim_path"
           else
-            sudo python3 main.py ${filter_flag} --max-workers="$MAX_WORKERS" --integration "$sim_path"
+            sudo "$RUNNER_TEMP/netsim-venv/bin/python" main.py ${filter_flag} --max-workers="$MAX_WORKERS" --integration "$sim_path"
           fi
         done
 
@@ -215,10 +220,10 @@ jobs:
       if: always()
       run: |
         cd ../chuck/netsim
-        python3 reports_csv.py --table > report_table.txt
-        python3 reports_csv.py --prom --commit "$LAST_COMMIT_SHA" > report_prom.txt
-        python3 reports_csv.py --metro --commit "$LAST_COMMIT_SHA" > report_metro.txt
-        python3 reports_csv.py --metro --integration --commit "$LAST_COMMIT_SHA" > report_metro_integration.txt
+        "$RUNNER_TEMP/netsim-venv/bin/python" reports_csv.py --table > report_table.txt
+        "$RUNNER_TEMP/netsim-venv/bin/python" reports_csv.py --prom --commit "$LAST_COMMIT_SHA" > report_prom.txt
+        "$RUNNER_TEMP/netsim-venv/bin/python" reports_csv.py --metro --commit "$LAST_COMMIT_SHA" > report_metro.txt
+        "$RUNNER_TEMP/netsim-venv/bin/python" reports_csv.py --metro --integration --commit "$LAST_COMMIT_SHA" > report_metro_integration.txt
 
     - name: Cache AWS CLI
       if: always()
