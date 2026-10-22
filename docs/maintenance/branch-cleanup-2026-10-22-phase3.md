@@ -73,7 +73,7 @@ one-row archival change:
 | `lab/staya-custom-path-withdrawal-repro-20261019` | Preserve the unique regression before transplantation. |
 | `lab/staya-iroh-fork-census-20261019` | Retain the research corpus and its exact history; do not bulk-import generated inventories into runtime source. |
 | `lab/staya-relay-4616-4617-joint-20261019` | Reconcile joint relay implementation and tests. |
-| `lab/staya-relay-backend-restart-20261019` | Preserve backend-restart scenarios when consolidating relay tests. |
+| `lab/staya-relay-backend-restart-20261019` | Preserve strict TLS, datagrams and client reconnection; the branch name does not prove server restart. See the phase-4 review. |
 | `lab/staya-relay-prefix-4617-20261019` | Compare prefix/client/reporting deltas with the joint branch. |
 | `lab/staya-relay-tls-parallel-20261019` | Preserve distinct TLS-churn scenarios; divergence is not redundancy. |
 | `repro/iroh-4603-speed-control-20261018` | Retain the independent control regression and the paired experiment's pinned baseline. |

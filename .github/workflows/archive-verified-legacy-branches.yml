@@ -1,6 +1,7 @@
 # Historical phase 1 archived 16 verified refs (run 39701032101).
 # Phase 2 archived four more refs (run 39773821288).
-# Phase 3 retires the paired-workflow sibling after a real two-parent consolidation.
+# Phase 3 archived the paired-workflow sibling (run 39780847085).
+# Phase 4 retires the TLS-parallel sibling after preserving all relay scenarios.
 # All obsolete refs are retained by immutable archive tags before deletion.
 # Manual reruns are idempotent; a missing ref is not an error.
 name: Archive verified legacy branches
@@ -107,7 +108,7 @@ jobs:
               failures=$((failures + 1))
             fi
           done <<'VERIFIED_BRANCHES'
-          ancestor|lab/staya-paired-queue-capacity-20261018|d4eed219bffede909441cffdc8024ec285afe77f|lab/staya-hosted-patchbay-20261018
+          ancestor|lab/staya-relay-tls-parallel-20261019|30e732746a3ccc110010da01227800dbb0013100|lab/staya-relay-backend-restart-20261019
           VERIFIED_BRANCHES
           echo "Verified entries: $processed; failures: $failures" >> "$GITHUB_STEP_SUMMARY"
           if (( failures > 0 )); then exit 1; fi
