@@ -1,5 +1,6 @@
 # Historical phase 1 archived 16 verified refs (run 39701032101).
-# Phase 2 retires four more SHA-verified, provably redundant refs, then stops.
+# Phase 2 archived four more refs (run 39773821288).
+# Phase 3 retires the paired-workflow sibling after a real two-parent consolidation.
 # All obsolete refs are retained by immutable archive tags before deletion.
 # Manual reruns are idempotent; a missing ref is not an error.
 name: Archive verified legacy branches
@@ -106,10 +107,7 @@ jobs:
               failures=$((failures + 1))
             fi
           done <<'VERIFIED_BRANCHES'
-          merged|fix/ci-netsim-python-env-20261022|450c5fde1bcdf068e8efa4d7fc1909aaf28a4fd7|26
-          ancestor|fix/iroh-4588-lan-address|28fe8eae1ddb6239aae594eb7cda68eef5b3e83f|integration/roha-noq-forks-20261018
-          ancestor|lab/staya-noq-1-4-upgrade-20261019|adf41992d2e97298650b3fc16c4006ab7d1d3fc1|lab/staya-home-relay-4616-fix-20261019
-          ancestor|lab/staya-home-relay-4616-fix-20261019|98833e7d67f1646054a5456e85ca4899a04a3a9c|lab/staya-relay-4616-4617-joint-20261019
+          ancestor|lab/staya-paired-queue-capacity-20261018|d4eed219bffede909441cffdc8024ec285afe77f|lab/staya-hosted-patchbay-20261018
           VERIFIED_BRANCHES
           echo "Verified entries: $processed; failures: $failures" >> "$GITHUB_STEP_SUMMARY"
           if (( failures > 0 )); then exit 1; fi
