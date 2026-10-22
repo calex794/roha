@@ -16,12 +16,46 @@ const SCOPE_BYTES: usize = 16;
 const PROOF_BYTES: usize = 32 + 8 + 64; // Exact Akula lab signed-proof framing.
 const FRAME_BYTES: usize = SCOPE_BYTES + PROOF_BYTES;
 const MAX_WAIT: Duration = Duration::from_secs(12);
+const ORIGIN_DOMAIN: &[u8] = b"AKULA:NODE:READ-SCOPE-REVOKE:LAB-V0\0";
 
-fn frame(scope: [u8; SCOPE_BYTES], proof: [u8; PROOF_BYTES]) -> [u8; FRAME_BYTES] {
-    let mut out = [0u8; FRAME_BYTES];
-    out[..SCOPE_BYTES].copy_from_slice(&scope);
-    out[SCOPE_BYTES..].copy_from_slice(&proof);
-    out
+fn signed_bytes(scope: [u8; SCOPE_BYTES], doc: [u8; 32], seq: u64) -> Vec<u8> {
+    let mut data = ORIGIN_DOMAIN.to_vec();
+    data.extend_from_slice(&scope);
+    data.extend_from_slice(&doc);
+    data.extend_from_slice(&seq.to_be_bytes());
+    data
+}
+
+// Public deterministic test key. This key is separate from QUIC EndpointId.
+fn synthetic_signed_frame(
+    scope: [u8; SCOPE_BYTES],
+    document: [u8; 32],
+    sequence: u64,
+    admin: &iroh::SecretKey,
+) -> [u8; FRAME_BYTES] {
+    let mut data = [0u8; FRAME_BYTES];
+    data[..SCOPE_BYTES].copy_from_slice(&scope);
+    data[SCOPE_BYTES..SCOPE_BYTES + 32].copy_from_slice(&document);
+    data[SCOPE_BYTES + 32..SCOPE_BYTES + 40].copy_from_slice(&sequence.to_be_bytes());
+    let signature = admin.sign(&signed_bytes(scope, document, sequence));
+    data[SCOPE_BYTES + 40..].copy_from_slice(&signature.to_bytes());
+    data
+}
+
+fn verify_signed_origin(frame: &[u8], pinned_admin: &iroh::PublicKey) -> Result<()> {
+    ensure_any!(frame.len() == FRAME_BYTES, "invalid proof length");
+    let scope: [u8; SCOPE_BYTES] = frame[..SCOPE_BYTES].try_into().anyerr()?;
+    let doc: [u8; 32] = frame[SCOPE_BYTES..SCOPE_BYTES + 32].try_into().anyerr()?;
+    let seq = u64::from_be_bytes(frame[SCOPE_BYTES + 32..SCOPE_BYTES + 40].try_into().anyerr()?);
+    ensure_any!(seq > 0 && seq <= i64::MAX as u64, "invalid sequence");
+    let sig: [u8; 64] = frame[SCOPE_BYTES + 40..].try_into().anyerr()?;
+    ensure_any!(
+        pinned_admin
+            .verify(&signed_bytes(scope, doc, seq), &iroh::Signature::from_bytes(&sig))
+            .is_ok(),
+        "invalid scope administrator signature"
+    );
+    Ok(())
 }
 
 /// Exactly one authenticated, bounded direct QUIC hop.
@@ -33,7 +67,9 @@ async fn hop(
     destination: &Endpoint,
     allowed_source: EndpointId,
     allowed_scope: [u8; SCOPE_BYTES],
+    pinned_admin: &iroh::PublicKey,
     bytes: &[u8],
+    after_acceptance: impl FnOnce(&[u8]) -> Result<()>,
 ) -> Result<Vec<u8>> {
     ensure_any!(
         bytes.len() == FRAME_BYTES,
@@ -57,6 +93,10 @@ async fn hop(
             received[..SCOPE_BYTES] == allowed_scope,
             "scope does not match local subscription"
         );
+        verify_signed_origin(&received, pinned_admin)?;
+        // A production Akula adapter must only return Ok after durable policy
+        // acceptance. This lab callback uses memory and does NOT prove fsync.
+        after_acceptance(&received)?;
         response.write_all(b"OK").await.anyerr()?;
         response.finish().anyerr()?;
         // Retain the receiving connection until the sender has consumed ACK.
@@ -106,20 +146,29 @@ async fn demonstration() -> Result<()> {
         );
     }
 
-    // The bytes below are a synthetic stand-in for an owner/admin-signed
-    // Akula proof, not an actual valid signature. We only prove transport
-    // preservation; Akula must perform signature verification separately.
+    // Exactly the Akula PR #570 origin-signing domain and 104-byte proof
+    // structure. Roha's neighbor identity is NOT this administrator key.
     let allowed_scope = [0x42u8; SCOPE_BYTES];
-    let mut dummy_proof = [0u8; PROOF_BYTES];
-    dummy_proof[..32].fill(0x55); // synthetic document ID
-    dummy_proof[32..40].copy_from_slice(&7u64.to_be_bytes());
-    dummy_proof[40..].fill(0x83);
-    let original = frame(allowed_scope, dummy_proof);
+    let admin = iroh::SecretKey::from_bytes(&[87u8; 32]);
+    let pinned = admin.public();
+    let original = synthetic_signed_frame(allowed_scope, [0x55; 32], 7, &admin);
 
-    let at_b = hop(&a, &b, a.id(), allowed_scope, &original).await?;
+    let mut accepted_b = None;
+    let at_b = hop(&a, &b, a.id(), allowed_scope, &pinned, &original, |proof| {
+        accepted_b = Some(proof.to_vec());
+        Ok(())
+    })
+    .await?;
     ensure_any!(at_b == original, "A->B proof bytes changed");
-    let at_c = hop(&b, &c, b.id(), allowed_scope, &at_b).await?;
+    ensure_any!(accepted_b == Some(original.to_vec()), "B was not admitted");
+    let mut accepted_c = None;
+    let at_c = hop(&b, &c, b.id(), allowed_scope, &pinned, &at_b, |proof| {
+        accepted_c = Some(proof.to_vec());
+        Ok(())
+    })
+    .await?;
     ensure_any!(at_c == original, "B->C proof bytes changed");
+    ensure_any!(accepted_c == Some(original.to_vec()), "C was not admitted");
 
     a.close().await;
     b.close().await;
@@ -163,8 +212,13 @@ mod tests {
         let a = initiate_from_loopback().await?;
         let b = accept_on_loopback().await?;
         let other = initiate_from_loopback().await?;
-        let payload = frame([0x42u8; SCOPE_BYTES], [0u8; PROOF_BYTES]);
-        let result = hop(&a, &b, other.id(), [0x42u8; SCOPE_BYTES], &payload).await;
+        let admin = iroh::SecretKey::from_bytes(&[87u8; 32]);
+        let pinned = admin.public();
+        let payload = synthetic_signed_frame([0x42; SCOPE_BYTES], [0x55; 32], 7, &admin);
+        let result = hop(&a, &b, other.id(), [0x42u8; SCOPE_BYTES], &pinned, &payload, |_| {
+            Ok(())
+        })
+        .await;
         ensure_any!(result.is_err(), "unrecognized sender was accepted");
         a.close().await;
         b.close().await;
@@ -176,14 +230,59 @@ mod tests {
     async fn wrong_scope_cannot_complete_ack_and_no_extra_bytes_are_allowed() -> Result<()> {
         let a = initiate_from_loopback().await?;
         let b = accept_on_loopback().await?;
-        let payload = frame([0x01u8; SCOPE_BYTES], [0u8; PROOF_BYTES]);
-        let rejected = hop(&a, &b, a.id(), [0x42u8; SCOPE_BYTES], &payload).await;
+        let admin = iroh::SecretKey::from_bytes(&[87u8; 32]);
+        let pinned = admin.public();
+        let payload = synthetic_signed_frame([0x01; SCOPE_BYTES], [0x55; 32], 7, &admin);
+        let rejected = hop(&a, &b, a.id(), [0x42u8; SCOPE_BYTES], &pinned, &payload, |_| {
+            Ok(())
+        })
+        .await;
         ensure_any!(rejected.is_err(), "wrong scope was accepted");
         let too_long = vec![0u8; FRAME_BYTES + 1];
-        let rejected = hop(&a, &b, a.id(), [0x42u8; SCOPE_BYTES], &too_long).await;
+        let rejected = hop(&a, &b, a.id(), [0x42u8; SCOPE_BYTES], &pinned, &too_long, |_| {
+            Ok(())
+        })
+        .await;
         ensure_any!(rejected.is_err(), "oversized local frame was accepted");
         a.close().await;
         b.close().await;
         Ok(())
     }
+
+    #[tokio::test]
+    async fn a_signed_origin_from_an_unpinned_admin_is_never_acked() -> Result<()> {
+        let a = initiate_from_loopback().await?;
+        let b = accept_on_loopback().await?;
+        let legitimate = iroh::SecretKey::from_bytes(&[87u8; 32]);
+        let impostor = iroh::SecretKey::from_bytes(&[13u8; 32]);
+        let payload = synthetic_signed_frame([0x42; SCOPE_BYTES], [0x55; 32], 7, &impostor);
+        let refused = hop(
+            &a, &b, a.id(), [0x42; SCOPE_BYTES], &legitimate.public(), &payload, |_| Ok(()),
+        )
+        .await;
+        ensure_any!(refused.is_err(), "forged admin was acknowledged");
+        a.close().await;
+        b.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn positive_ack_requires_successful_acceptance_callback() -> Result<()> {
+        let a = initiate_from_loopback().await?;
+        let b = accept_on_loopback().await?;
+        let admin = iroh::SecretKey::from_bytes(&[87u8; 32]);
+        let payload = synthetic_signed_frame([0x42; SCOPE_BYTES], [0x55; 32], 7, &admin);
+        let rejected = hop(
+            &a, &b, a.id(), [0x42; SCOPE_BYTES], &admin.public(), &payload, |_| {
+                ensure_any!(false, "synthetic policy persistence rejected");
+                Ok(())
+            },
+        )
+        .await;
+        ensure_any!(rejected.is_err(), "ACK before policy acceptance");
+        a.close().await;
+        b.close().await;
+        Ok(())
+    }
+
 }
