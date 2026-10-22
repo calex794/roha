@@ -1,12 +1,8 @@
-name: STAYA relay TLS reverse-proxy integration
+name: STAYA consolidated relay scenarios
 on:
   push:
     branches:
-      - lab/staya-relay-prefix-nginx-e2e-20261019
-      - lab/staya-relay-tls-churn-20261019
-      - lab/staya-relay-forwarding-e2e-20261019
-      - lab/staya-relay-reconnect-e2e-20261019
-      - lab/staya-relay-strict-tls-20261019
+      - lab/staya-relay-backend-restart-20261019
   workflow_dispatch:
 permissions:
   contents: read
@@ -15,10 +11,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: "1.91.0"
+          components: rustfmt
+      - name: Export canonical formatting for source review
+        run: |
+          echo STAYA_RUSTFMT_BEGIN
+          rustfmt +1.91.0 --edition 2024 --emit stdout < iroh-relay/tests/relay_axum.rs
+          echo STAYA_RUSTFMT_END
       - name: Install local reverse proxy and TLS tools
         run: |
           sudo apt-get update -qq
@@ -63,3 +67,19 @@ jobs:
           STAYA_STRICT_TLS: "1"
           STAYA_DATAGRAM_E2E: "1"
         run: timeout 180s cargo +1.91.0 test --locked -p iroh-relay --features server,test-utils --test relay_axum relay_prefix_nginx_https_end_to_end -- --ignored --nocapture
+
+      - name: Sixteen simultaneous authenticated relay clients held for eight seconds
+        env:
+          STAYA_PARALLEL_CLIENTS: "16"
+        run: timeout 180s cargo +1.91.0 test --locked -p iroh-relay --features server,test-utils --test relay_axum relay_prefix_nginx_https_end_to_end -- --ignored --nocapture
+
+      - name: Combine verified TLS, payloads, client reconnect and parallel clients
+        env:
+          STAYA_STRICT_TLS: "1"
+          STAYA_DATAGRAM_E2E: "1"
+          STAYA_RECONNECT_E2E: "1"
+          STAYA_PARALLEL_CLIENTS: "16"
+        run: timeout 180s cargo +1.91.0 test --locked -p iroh-relay --features server,test-utils --test relay_axum relay_prefix_nginx_https_end_to_end -- --ignored --nocapture
+
+      - name: Assert dependencies remain unchanged
+        run: git diff --exit-code Cargo.lock

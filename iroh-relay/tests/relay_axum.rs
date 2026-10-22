@@ -605,5 +605,85 @@ http {{
         assert_eq!(status_for(ping_url.clone()).await?, "200");
         eprintln!("STAYA relay data path: 8/8 directional datagrams delivered through nginx TLS");
     }
+
+    // Preserve the parallel-client scenario alongside strict TLS and datagrams.
+    let parallel: usize = std::env::var("STAYA_PARALLEL_CLIENTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    assert!(parallel <= 32, "bounded to 32 parallel clients");
+    if parallel > 0 {
+        use iroh_relay::protos::relay::{ClientToRelayMsg, RelayToClientMsg};
+        use n0_future::{SinkExt, StreamExt};
+        let (ready_tx, mut ready_rx) = tokio::sync::mpsc::channel(parallel);
+        let release = Arc::new(tokio::sync::Barrier::new(parallel + 1));
+        let mut tasks = Vec::with_capacity(parallel);
+        for index in 0..parallel {
+            let url = relay_url.clone();
+            let tls = tls_config.clone();
+            let tx = ready_tx.clone();
+            let release = release.clone();
+            let key = SecretKey::from_bytes(&rng.random());
+            tasks.push(tokio::spawn(async move {
+                let mut conn = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    ClientBuilder::new(url, key, DnsResolver::new())
+                        .tls_client_config(tls)
+                        .connect(),
+                )
+                .await
+                .std_context("parallel relay connect timed out")??;
+                let payload = (index as u64).to_be_bytes();
+                conn.send(ClientToRelayMsg::Ping(payload)).await?;
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while let Some(message) = conn.next().await {
+                        if let RelayToClientMsg::Pong(p) = message? {
+                            if p == payload {
+                                return Ok::<_, n0_error::AnyError>(());
+                            }
+                        }
+                    }
+                    return Err(n0_error::AnyError::from("relay stream ended before ping response"));
+                })
+                .await
+                .std_context("parallel relay ping timed out")??;
+                tx.send(index).await.expect("parallel result receiver disappeared");
+                release.wait().await;
+                // Verify each connection is still usable after the hold.
+                conn.send(ClientToRelayMsg::Ping(payload)).await?;
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while let Some(message) = conn.next().await {
+                        if let RelayToClientMsg::Pong(p) = message? {
+                            if p == payload {
+                                return Ok::<_, n0_error::AnyError>(());
+                            }
+                        }
+                    }
+                    return Err(n0_error::AnyError::from("relay stream ended during hold"));
+                })
+                .await
+                .std_context("parallel relay second ping timed out")??;
+                Ok::<_, n0_error::AnyError>(())
+            }));
+        }
+        drop(ready_tx);
+        let finish = async {
+            for _ in 0..parallel {
+                ready_rx.recv().await.expect("parallel client exited early");
+            }
+            assert_eq!(status_for(ping_url.clone()).await?, "200");
+            tokio::time::sleep(Duration::from_secs(8)).await;
+            assert_eq!(status_for(ping_url.clone()).await?, "200");
+            release.wait().await;
+            for task in tasks {
+                task.await.expect("parallel client task panicked")?;
+            }
+            Ok::<_, n0_error::AnyError>(())
+        };
+        tokio::time::timeout(Duration::from_secs(60), finish)
+            .await
+            .std_context("parallel relay test timed out")??;
+        eprintln!("STAYA parallel live relay clients: {parallel}/{parallel}");
+    }
     Ok(())
 }
