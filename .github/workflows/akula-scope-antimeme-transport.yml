@@ -3,6 +3,7 @@ on:
   pull_request:
     paths:
       - 'iroh/examples/akula_scope_antimeme_transport_lab.rs'
+      - 'iroh/examples/akula_scope_antimeme_transport_lab/**'
       - 'labs/akula-antimeme-transport/**'
       - '.github/workflows/akula-scope-antimeme-transport.yml'
   workflow_dispatch:
@@ -38,4 +39,4 @@ jobs:
           AKULA_POLICY_LAB_BIN: ${{ github.workspace }}/akula/aquilum-app/target/debug/akula-node-policy-lab
         run: |
           test -x "$AKULA_POLICY_LAB_BIN"
-          cargo test --locked -p iroh --example akula_scope_antimeme_transport_lab -- cross_repo::roha_quic_ack_only_after_real_akula_sqlite_acceptance --exact --nocapture
+          cargo test --locked -p iroh --example akula_scope_antimeme_transport_lab -- cross_repo::roha_quic_ack_only_after_real_akula_sqlite_acceptance --exact --ignored --nocapture
