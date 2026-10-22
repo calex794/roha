@@ -17,6 +17,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
           toolchain: "1.91.0"
+      # Match the namespace setup already used by the main Patchbay workflow.
+      # The following unshare probe remains mandatory; namespace failure is fatal.
+      - name: Enable unprivileged user namespaces on hosted runner
+        run: |
+          set -eu
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       - name: Probe namespace capability
         run: |
           set -eu

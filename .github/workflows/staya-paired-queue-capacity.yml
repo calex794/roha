@@ -1,0 +1,68 @@
+name: Staya paired relay throughput laboratory
+
+on:
+  push:
+    branches:
+      - "lab/staya-hosted-patchbay-20261018"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  same-runner:
+    name: Same runner, two exact commits, alternating runs
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout baseline at verified SHA
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: calex794/roha
+          ref: 72ccea6f3c5e6747618870efbd38dd68f9dbeb9c
+          path: baseline
+          persist-credentials: false
+      - name: Checkout combined fixes at verified SHA
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: calex794/roha
+          ref: a4854254bb143f91bf416f1a2601bd0394ecb034
+          path: corrected
+          persist-credentials: false
+      - name: Install exact Rust version
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: "1.91.0"
+          components: rustfmt
+      - name: Verify source identity
+        run: |
+          set -eu
+          test "$(git -C baseline rev-parse HEAD)" = "72ccea6f3c5e6747618870efbd38dd68f9dbeb9c"
+          test "$(git -C corrected rev-parse HEAD)" = "a4854254bb143f91bf416f1a2601bd0394ecb034"
+          rustc --version
+          uname -a
+          git -C baseline rev-parse HEAD
+          git -C corrected rev-parse HEAD
+      - name: Compile both identical tests before measuring
+        run: |
+          set -eu
+          (cd baseline && cargo test --locked -p iroh --lib relay_two_healthy_capacity_reference --no-run)
+          (cd corrected && cargo test --locked -p iroh --lib relay_two_healthy_capacity_reference --no-run)
+      - name: Alternating warmups and measured repetitions
+        env:
+          RUST_TEST_THREADS: "1"
+        run: |
+          set -eu
+          for round in 0 1 2 3 4 5 6 7; do
+            if [ $((round % 2)) -eq 0 ]; then
+              first=baseline
+              second=corrected
+            else
+              first=corrected
+              second=baseline
+            fi
+            for branch in "$first" "$second"; do
+              echo "STAYA_PAIRED_ROUND round=$round branch=$branch warmup=$([ "$round" -eq 0 ] && echo yes || echo no)"
+              (cd "$branch" && STAYA_BUILD_KIND="$branch" cargo test --locked -p iroh --lib relay_two_healthy_capacity_reference -- --nocapture)
+            done
+          done
