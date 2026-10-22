@@ -1,6 +1,7 @@
-# Guarded archive retry: trigger once when the fixed ref-lookup and queue-pruner land in main.
-# Exact SHA, merged-PR proof, keeper ancestry and open-PR guards still apply.
-# Keep a manual re-run option; no experimental branch is deleted without a proof.
+# Historical phase 1 archived 16 verified refs (run 39701032101).
+# Phase 2 retires four more SHA-verified, provably redundant refs, then stops.
+# All obsolete refs are retained by immutable archive tags before deletion.
+# Manual reruns are idempotent; a missing ref is not an error.
 name: Archive verified legacy branches
 on:
   push:
@@ -41,7 +42,29 @@ jobs:
           archive_one() {
             local kind="$1" branch="$2" expected="$3" witness="$4"
             local current proof keeper_sha comparison
-            current="$(gh api "repos/${REPO}/git/ref/heads/${branch}" --jq '.object.sha' 2>/dev/null || true)"
+            # Matching-refs yields [] for an absent branch; unlike single-ref
+            # lookup, errors are never turned into an unsafe "already absent".
+            local ref_json
+            if ! ref_json="$(gh api "repos/${REPO}/git/matching-refs/heads/${branch}")"; then
+              echo "::error::Cannot verify branch ref for $branch"
+              return 1
+            fi
+            if ! current="$(jq -r --arg exact "refs/heads/${branch}" '
+              if type != "array" then error("not a ref array")
+              else
+                [.[] | select(.ref == $exact) | .object.sha] |
+                if length == 0 then ""
+                elif length == 1 and
+                     (.[0] | type) == "string" and
+                     (.[0] | test("^[0-9a-f]{40}$"))
+                then .[0]
+                else error("invalid or ambiguous branch ref")
+                end
+              end
+            ' <<< "$ref_json")"; then
+              echo "::error::Invalid branch ref response for $branch"
+              return 1
+            fi
             if [[ -z "$current" ]]; then echo "Already absent: $branch"; return 0; fi
             if [[ "$current" != "$expected" ]]; then
               echo "::warning::Ref moved since audit: $branch, refusing archival"
@@ -83,22 +106,10 @@ jobs:
               failures=$((failures + 1))
             fi
           done <<'VERIFIED_BRANCHES'
-          merged|ci/auto-merge-enroll-20261021|d76d05097e28a4a3395e84722f98cc0e208c43a8|24
-          merged|ci/remove-selfhosted-backlog-20261021|b0e9df28fc0fc7bca1809db74c042ca18ce6c8fd|25
-          merged|integration/roha-security-after-baseline-20261021|4ba65403afba3d53bb95803c0dac470bdbdbdd2f|18
-          merged|lab/baseline-20261018|22264f85842a90467063de20bf5c53a37a250f9f|15
-          merged|ops/branch-hygiene-20261021|299d775ad5fa00c61aa17d905f6bd1988362d2b2|21
-          ancestor|fix/ftr40-iroh14-queue-cap-20261021|be3db23a544d0058b91bee9b2cedc15ab7cfd137|integration/iroh-1-4-upstream-20261021
-          ancestor|integration/iroh-1-4-merged-main-20261021|1ee15e95ef2c0f81f6483d08b2fc8583a620d7b6|integration/iroh-1-4-upstream-20261021
-          ancestor|lab/staya-home-relay-4616-repro-20261019|b09f753bd5c6865618de15b2d5e417eb59a6e498|lab/staya-home-relay-4616-fix-20261019
-          ancestor|lab/staya-relay-strict-tls-20261019|2ef1faf72eef98dc4496527a85ce91fcd82b07b2|lab/staya-relay-backend-restart-20261019
-          ancestor|lab/staya-relay-tls-churn-20261019|8dee11dd0a875f865abde01dfc0a7edddf003603|lab/staya-relay-tls-parallel-20261019
-          ancestor|lab/staya-relay-4616-4617-clean-20261019|97ebb3e427a27fb3962a340f6ed22821f6df1c54|lab/staya-relay-prefix-nginx-e2e-20261019
-          ancestor|lab/staya-relay-prefix-nginx-e2e-20261019|286b0f7a1235861593c781e82ceabdb1240d651c|lab/staya-relay-forwarding-e2e-20261019
-          ancestor|lab/staya-relay-forwarding-e2e-20261019|583247a23098318ef86fa04b1d587170136214bf|lab/staya-relay-reconnect-e2e-20261019
-          ancestor|lab/staya-relay-reconnect-e2e-20261019|9f9a99c415c3fff4d353f20c9f0dc8799f9a7cf0|lab/staya-relay-backend-restart-20261019
-          ancestor|repro/iroh-4588-lan-address|cea4994336992b9a0b65fd97273327e9ddcfc664|fix/iroh-4588-lan-address
-          ancestor|repro/iroh-4600-stale-selected-path|6fc4324399f397c97994c0cd445b436e58499284|fix/iroh-4600-stale-selected-path
+          merged|fix/ci-netsim-python-env-20261022|450c5fde1bcdf068e8efa4d7fc1909aaf28a4fd7|26
+          ancestor|fix/iroh-4588-lan-address|28fe8eae1ddb6239aae594eb7cda68eef5b3e83f|integration/roha-noq-forks-20261018
+          ancestor|lab/staya-noq-1-4-upgrade-20261019|adf41992d2e97298650b3fc16c4006ab7d1d3fc1|lab/staya-home-relay-4616-fix-20261019
+          ancestor|lab/staya-home-relay-4616-fix-20261019|98833e7d67f1646054a5456e85ca4899a04a3a9c|lab/staya-relay-4616-4617-joint-20261019
           VERIFIED_BRANCHES
           echo "Verified entries: $processed; failures: $failures" >> "$GITHUB_STEP_SUMMARY"
           if (( failures > 0 )); then exit 1; fi
