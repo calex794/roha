@@ -21,3 +21,7 @@ Existing Roha laboratory [PR #19](https://github.com/calex794/roha/pull/19) alre
 - No public upstream, self-hosted relay or NAT traversal measured in this example; direct-only peers on one host are not a real wide-area mesh.
 - Still required: exchange of Akula-signed proof between separate Roha Node processes, handoff to production authorized scope policy, durable independent rollback witness, and replay/anti-entropy reconciliation through STAYA.
 - The code is additive to Roha examples and tests; it does not modify the Iroh 1.3 transport implementation or API and should not be merged before exact-head CI.
+
+## Verified failure investigation (new change pending CI)
+
+Initial direct-only CI compiled the example and passed both rejection tests, but the A→B→C positive test failed with `connection lost: closed by peer 0`. This was a teardown/ACK ordering bug: the receiving coroutine returned as soon as its OK stream was finished, closing the connection before the sending coroutine had consumed the final ACK. The receiver now waits for the sender to close the authenticated QUIC connection **after** it reads OK. The transport still does not imply Akula policy authorization. The prior CI also failed source formatting and the repository's pinact/zizmor checks, so the workflow now uses the already vetted pinned rust-toolchain action SHA and the example follows rustfmt. Exact-head CI is required to validate the fixes.

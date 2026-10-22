@@ -6,9 +6,10 @@
 //!
 //! This is a three-endpoint direct-only lab. No public n0 relay, address
 //! lookup, vault, file access, proof signing authority or network discovery.
+use std::time::Duration;
+
 use iroh::{Endpoint, EndpointId, endpoint::presets};
 use n0_error::{AnyError, Result, StdResultExt, ensure_any};
-use std::time::Duration;
 
 const ALPN: &[u8] = b"akula/staya/scope-antimeme-transport-lab/0";
 const SCOPE_BYTES: usize = 16;
@@ -34,7 +35,10 @@ async fn hop(
     allowed_scope: [u8; SCOPE_BYTES],
     bytes: &[u8],
 ) -> Result<Vec<u8>> {
-    ensure_any!(bytes.len() == FRAME_BYTES, "incorrect Akula revocation frame length");
+    ensure_any!(
+        bytes.len() == FRAME_BYTES,
+        "incorrect Akula revocation frame length"
+    );
 
     let receiving = async {
         let incoming = destination.accept().await.anyerr()?;
@@ -55,6 +59,9 @@ async fn hop(
         );
         response.write_all(b"OK").await.anyerr()?;
         response.finish().anyerr()?;
+        // Retain the receiving connection until the sender has consumed ACK.
+        // Otherwise dropping it races peer read_to_end and closes QUIC with 0.
+        connection.closed().await;
         Ok::<Vec<u8>, AnyError>(received)
     };
 
@@ -64,17 +71,20 @@ async fn hop(
         request.write_all(bytes).await.anyerr()?;
         request.finish().anyerr()?;
         let acknowledgment = response.read_to_end(2).await.anyerr()?;
-        ensure_any!(acknowledgment == b"OK", "receiving neighbor did not acknowledge");
+        ensure_any!(
+            acknowledgment == b"OK",
+            "receiving neighbor did not acknowledge"
+        );
+        connection.close(0u32.into(), b"ack-consumed");
         Ok::<(), AnyError>(())
     };
 
     // Bounded total handshake, write, verification and ACK; no unbounded
     // connection wait when a peer becomes unavailable.
-    let (received, ()) = tokio::time::timeout(MAX_WAIT, async {
-        tokio::try_join!(receiving, sending)
-    })
-    .await
-    .anyerr()??;
+    let (received, ()) =
+        tokio::time::timeout(MAX_WAIT, async { tokio::try_join!(receiving, sending) })
+            .await
+            .anyerr()??;
     Ok(received)
 }
 
@@ -116,7 +126,6 @@ async fn demonstration() -> Result<()> {
     c.close().await;
     Ok(())
 }
-
 
 async fn initiate_from_loopback() -> Result<Endpoint> {
     Ok(Endpoint::builder(presets::Minimal)
