@@ -29,6 +29,6 @@ jobs:
         with:
           persist-credentials: false
       - name: Test cancellation decisions and recheck
-        run: python3 -m unittest discover -s .github/scripts/tests -p 'test_prune_stale_actions.py' -v
+        run: python3 -m unittest discover -s .github/scripts/tests -p 'test_*.py' -v
       - name: Verify archival helper shell syntax
         run: bash -n .github/scripts/archive-orphan.sh

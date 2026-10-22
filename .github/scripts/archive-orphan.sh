@@ -57,9 +57,31 @@ fi
 check_open_pr_dependencies
 
 archive_tag="archive/${TARGET_BRANCH}/${EXPECTED_SHA:0:12}"
-# A missing ref can render as JSON null through gh --jq; do not mistake
-# that literal string for an existing tag with a conflicting commit.
-existing="$(gh api "repos/${REPO}/git/ref/tags/${archive_tag}" --jq '.object.sha // empty' 2>/dev/null || true)"
+
+# A missing single-ref API result is HTTP 404; gh --jq can still print 'null'.
+# Use the matching-refs collection (HTTP 200, [] on absent), then filter
+# the exact full tag name. API errors and ambiguous values must fail closed.
+lookup_archive_sha() {
+  local response
+  response="$(gh api "repos/${REPO}/git/matching-refs/tags/${archive_tag}")" || {
+    echo "::error::Unable to list archive tags; branch remains intact" >&2
+    return 1
+  }
+  jq -r --arg full_ref "refs/tags/${archive_tag}" '
+    if type != "array" then error("unexpected archive ref listing")
+    else
+      [.[] | select(.ref == $full_ref) | .object.sha] |
+      if length == 0 then ""
+      elif length == 1 and
+           (.[0] | type) == "string" and
+           (.[0] | test("^[0-9a-f]{40}$"))
+      then .[0]
+      else error("ambiguous or invalid exact archive ref")
+      end
+    end
+  ' <<< "${response}"
+}
+existing="$(lookup_archive_sha)" || exit 1
 if [[ -n "${existing}" && "${existing}" != "${EXPECTED_SHA}" ]]; then
   echo "::error::Archive tag already exists with a different commit"
   exit 1
@@ -76,7 +98,7 @@ if [[ -z "${existing}" ]]; then
   gh api --method POST "repos/${REPO}/git/refs" \
     -f ref="refs/tags/${archive_tag}" -f sha="${EXPECTED_SHA}" --silent
 fi
-tag_sha="$(gh api "repos/${REPO}/git/ref/tags/${archive_tag}" --jq '.object.sha // empty')"
+tag_sha="$(lookup_archive_sha)" || exit 1
 if [[ "${tag_sha}" != "${EXPECTED_SHA}" ]]; then
   echo "::error::Archive tag did not verify; branch remains intact"
   exit 1
