@@ -46,12 +46,19 @@ fn verify_signed_origin(frame: &[u8], pinned_admin: &iroh::PublicKey) -> Result<
     ensure_any!(frame.len() == FRAME_BYTES, "invalid proof length");
     let scope: [u8; SCOPE_BYTES] = frame[..SCOPE_BYTES].try_into().anyerr()?;
     let doc: [u8; 32] = frame[SCOPE_BYTES..SCOPE_BYTES + 32].try_into().anyerr()?;
-    let seq = u64::from_be_bytes(frame[SCOPE_BYTES + 32..SCOPE_BYTES + 40].try_into().anyerr()?);
+    let seq = u64::from_be_bytes(
+        frame[SCOPE_BYTES + 32..SCOPE_BYTES + 40]
+            .try_into()
+            .anyerr()?,
+    );
     ensure_any!(seq > 0 && seq <= i64::MAX as u64, "invalid sequence");
     let sig: [u8; 64] = frame[SCOPE_BYTES + 40..].try_into().anyerr()?;
     ensure_any!(
         pinned_admin
-            .verify(&signed_bytes(scope, doc, seq), &iroh::Signature::from_bytes(&sig))
+            .verify(
+                &signed_bytes(scope, doc, seq),
+                &iroh::Signature::from_bytes(&sig)
+            )
             .is_ok(),
         "invalid scope administrator signature"
     );
@@ -215,9 +222,15 @@ mod tests {
         let admin = iroh::SecretKey::from_bytes(&[87u8; 32]);
         let pinned = admin.public();
         let payload = synthetic_signed_frame([0x42; SCOPE_BYTES], [0x55; 32], 7, &admin);
-        let result = hop(&a, &b, other.id(), [0x42u8; SCOPE_BYTES], &pinned, &payload, |_| {
-            Ok(())
-        })
+        let result = hop(
+            &a,
+            &b,
+            other.id(),
+            [0x42u8; SCOPE_BYTES],
+            &pinned,
+            &payload,
+            |_| Ok(()),
+        )
         .await;
         ensure_any!(result.is_err(), "unrecognized sender was accepted");
         a.close().await;
@@ -233,15 +246,27 @@ mod tests {
         let admin = iroh::SecretKey::from_bytes(&[87u8; 32]);
         let pinned = admin.public();
         let payload = synthetic_signed_frame([0x01; SCOPE_BYTES], [0x55; 32], 7, &admin);
-        let rejected = hop(&a, &b, a.id(), [0x42u8; SCOPE_BYTES], &pinned, &payload, |_| {
-            Ok(())
-        })
+        let rejected = hop(
+            &a,
+            &b,
+            a.id(),
+            [0x42u8; SCOPE_BYTES],
+            &pinned,
+            &payload,
+            |_| Ok(()),
+        )
         .await;
         ensure_any!(rejected.is_err(), "wrong scope was accepted");
         let too_long = vec![0u8; FRAME_BYTES + 1];
-        let rejected = hop(&a, &b, a.id(), [0x42u8; SCOPE_BYTES], &pinned, &too_long, |_| {
-            Ok(())
-        })
+        let rejected = hop(
+            &a,
+            &b,
+            a.id(),
+            [0x42u8; SCOPE_BYTES],
+            &pinned,
+            &too_long,
+            |_| Ok(()),
+        )
         .await;
         ensure_any!(rejected.is_err(), "oversized local frame was accepted");
         a.close().await;
@@ -257,7 +282,13 @@ mod tests {
         let impostor = iroh::SecretKey::from_bytes(&[13u8; 32]);
         let payload = synthetic_signed_frame([0x42; SCOPE_BYTES], [0x55; 32], 7, &impostor);
         let refused = hop(
-            &a, &b, a.id(), [0x42; SCOPE_BYTES], &legitimate.public(), &payload, |_| Ok(()),
+            &a,
+            &b,
+            a.id(),
+            [0x42; SCOPE_BYTES],
+            &legitimate.public(),
+            &payload,
+            |_| Ok(()),
         )
         .await;
         ensure_any!(refused.is_err(), "forged admin was acknowledged");
@@ -273,7 +304,13 @@ mod tests {
         let admin = iroh::SecretKey::from_bytes(&[87u8; 32]);
         let payload = synthetic_signed_frame([0x42; SCOPE_BYTES], [0x55; 32], 7, &admin);
         let rejected = hop(
-            &a, &b, a.id(), [0x42; SCOPE_BYTES], &admin.public(), &payload, |_| {
+            &a,
+            &b,
+            a.id(),
+            [0x42; SCOPE_BYTES],
+            &admin.public(),
+            &payload,
+            |_| {
                 ensure_any!(false, "synthetic policy persistence rejected");
                 Ok(())
             },
@@ -284,9 +321,7 @@ mod tests {
         b.close().await;
         Ok(())
     }
-
 }
-
 
 // This test alone crosses the repository boundary. It runs only when the
 // dedicated CI supplies the feature-gated Akula PR #570 Linux node binary.
@@ -449,16 +484,23 @@ mod cross_repo {
         let second = IsolatedRoots::new(2)?;
         let admin = iroh::SecretKey::from_bytes(&[87u8; 32]);
         let admin_public = admin.public();
-        ensure_any!(first.document == second.document, "same source has mismatched ID");
+        ensure_any!(
+            first.document == second.document,
+            "same source has mismatched ID"
+        );
         let node_b = AkulaNode::start(&first, &admin_public)?;
         let node_c = AkulaNode::start(&second, &admin_public)?;
         let doc_id = hex(&first.document);
         ensure_any!(
-            node_b.command(&format!("READ {doc_id}"))?.contains(r#""status":"allowed""#),
+            node_b
+                .command(&format!("READ {doc_id}"))?
+                .contains(r#""status":"allowed""#),
             "B could not read before revocation"
         );
         ensure_any!(
-            node_c.command(&format!("READ {doc_id}"))?.contains(r#""status":"allowed""#),
+            node_c
+                .command(&format!("READ {doc_id}"))?
+                .contains(r#""status":"allowed""#),
             "C could not read before revocation"
         );
 
@@ -478,7 +520,9 @@ mod cross_repo {
         .await?;
         ensure_any!(observed_b == proof, "B modified original signed evidence");
         ensure_any!(
-            node_b.command(&format!("READ {doc_id}"))?.contains(r#""status":"blocked""#),
+            node_b
+                .command(&format!("READ {doc_id}"))?
+                .contains(r#""status":"blocked""#),
             "B still distributes a revoked document"
         );
 
@@ -493,7 +537,9 @@ mod cross_repo {
         .await?;
         ensure_any!(observed_c == proof, "C modified original signed evidence");
         ensure_any!(
-            node_c.command(&format!("READ {doc_id}"))?.contains(r#""status":"blocked""#),
+            node_c
+                .command(&format!("READ {doc_id}"))?
+                .contains(r#""status":"blocked""#),
             "C still distributes a revoked document"
         );
         drop(node_c);
