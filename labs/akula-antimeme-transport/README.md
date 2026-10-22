@@ -33,3 +33,13 @@ The next experimental version replaces the previously meaningless 104-byte dummy
 The receiver validates the pin for the scope, checks the source signature using Iroh's Ed25519 PublicKey, and calls a separate admission callback. Only after that callback returns success does it send QUIC `OK`. The callback is **in-memory only** in current positive tests: it proves acknowledgment ordering, not real durable SQLite acceptance. Negative tests reject a properly transported frame bearing another administrator's signature and withhold acknowledgment when the acceptance callback refuses.
 
 **Still missing to complete the requested cross-repository integration:** connect the callback to a real Akula `ScopedRevocations::ingest()` transaction through its loopback Node interface, after which a positive ACK will only follow confirmed SQLite commit. That must run with both compiled runtimes, not simulated in Iroh. Do not claim that current changes are production device ACL, durable witness or genuine Roha ↔ Akula cross-process acceptance.
+
+## Actual Akula process on the receiving side (single targeted CI job)
+
+The Roha lab also provides one isolated Linux cross-repository check. Its workflow checks out exact Akula PR #570 commit ed0291f8 and builds only the feature-gated akula-node-policy-lab binary, without changing normal Akula builds, released Core or default Roha transport. The binary uses the real pinned ReadCatalog and the real scope-bound Ed25519 ScopedRevocations verifier with appdata SQLite.
+
+Test: spawn two independent Akula Node subprocesses with separate temporary vaults and SQLite databases; confirm permitted reads; start three direct QUIC peers A→B→C; forward a correctly signed administrator anti-meme. The Roha receiver verifies scope, pinned neighbor, and origin administrator signature, then calls B's real Akula loopback AUTH/BAN endpoint. Roha sends a positive QUIC acknowledgment only after Akula confirms the SQLite commit by reporting applied. Repeat at C and restart C to prove the ban survived; both source files remain unchanged.
+
+The test runs inside the existing dedicated Roha workflow job, not a new matrix. The Akula commit SHA is pinned intentionally and must not silently follow a moving branch.
+
+Limits: no product STAYA discovery, WAN relays, owner-and-admin two-party grants, global durable rollback witness or automatic anti-entropy resend. A malicious host can still roll back an old valid SQLite snapshot. A receipt demonstrates this instance's current accepted state, not irreversible physical deletion.

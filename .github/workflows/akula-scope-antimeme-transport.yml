@@ -24,3 +24,18 @@ jobs:
           toolchain: stable
       - name: Run three independent Iroh endpoint transport tests
         run: cargo test --locked -p iroh --example akula_scope_antimeme_transport_lab -- --nocapture
+      - name: Checkout exact Akula signed-gate PR code (isolated)
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: Lalalalendia/Akula
+          ref: ed0291f8db71b9072e547b2aee0f85d5d39125c1
+          path: akula
+          persist-credentials: false
+      - name: Build only Akula's opt-in scope policy subprocess
+        run: cargo build --locked --manifest-path akula/aquilum-app/Cargo.toml -p aquilum-core --features node-scope-revocation-lab --bin akula-node-policy-lab
+      - name: Assert QUIC acknowledgment follows real Akula SQLite admission
+        env:
+          AKULA_POLICY_LAB_BIN: ${{ github.workspace }}/akula/aquilum-app/target/debug/akula-node-policy-lab
+        run: |
+          test -x "$AKULA_POLICY_LAB_BIN"
+          cargo test --locked -p iroh --example akula_scope_antimeme_transport_lab -- cross_repo::roha_quic_ack_only_after_real_akula_sqlite_acceptance --exact --nocapture
