@@ -12,7 +12,7 @@ HELPER = Path(__file__).resolve().parents[1] / "archive-orphan.sh"
 GOOD_SHA = "a" * 40
 BAD_SHA = "b" * 40
 
-FAKE_GH = textwrap.dedent("""\
+FAKE_GH = textwrap.dedent(r"""
     #!/usr/bin/env python3
     import json
     import os
@@ -73,9 +73,9 @@ FAKE_GH = textwrap.dedent("""\
     else:
         print("unexpected gh API operation: " + repr(args), file=sys.stderr)
         sys.exit(70)
-""")
+""").lstrip()
 
-FAKE_GIT = textwrap.dedent("""\
+FAKE_GIT = textwrap.dedent(r"""
     #!/usr/bin/env python3
     import os
     from pathlib import Path
@@ -84,7 +84,7 @@ FAKE_GIT = textwrap.dedent("""\
         with Path(os.environ["FAKE_ACTION_LOG"]).open("a", encoding="utf-8") as out:
             out.write("branch-deleted\n")
     sys.exit(0)
-""")
+""").lstrip()
 
 
 class ArchiveOrphanSafetyTests(unittest.TestCase):
