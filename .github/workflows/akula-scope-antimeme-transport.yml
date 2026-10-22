@@ -20,5 +20,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
       - name: Run three independent Iroh endpoint transport tests
         run: cargo test --locked -p iroh --example akula_scope_antimeme_transport_lab -- --nocapture
