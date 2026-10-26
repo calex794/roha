@@ -90,17 +90,40 @@ jobs:
           cp iroh-relay/tests/relay_axum.rs /tmp/staya-pr4617-nginx-test.rs
           git clone --quiet --depth 1 --branch relay-url-prefix https://github.com/meiyasan/iroh.git pr4617
           test "$(git -C pr4617 rev-parse HEAD)" = "aca28deaa6db9d359de7b8aa70c5673ced1fd7d1"
-      - name: RED - older tested Roha prefix code without final slash should fail
+      - name: RED - Roha lacks RelayUrl normalization even though nginx routing already works
         run: |
           set -euo pipefail
+          # Existing Roha routing already accepts /prefix without a final slash.
+          # RED must instead exercise PR4617's NEW contract for the stored RelayUrl
+          # and the serde deserializer; old nginx connectivity is a passing control.
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("iroh-base/src/relay_url.rs")
+          s = p.read_text()
+          assert s.endswith("}\n")
+          assert "fn test_relay_url_absolute()" in s
+          new_test = '''
+              #[test]
+              fn staya_red_relay_url_must_normalize_missing_slash() {
+                  let url: RelayUrl = "https://example.com/prefix".parse().unwrap();
+                  assert_eq!(url.as_str(), "https://example.com/prefix/",
+                      "STAYA: RelayUrl did not normalize missing trailing slash");
+                  let decoded: RelayUrl = serde_json::from_str(r#""https://example.com/prefix""#).unwrap();
+                  assert_eq!(decoded.as_str(), "https://example.com/prefix/",
+                      "STAYA: RelayUrl deserialization did not normalize trailing slash");
+              }
+          '''
+          p.write_text(s[:-2] + new_test + "}\n")
+          PY
           set +e
-          timeout 1600s cargo +1.91.0 test --locked -p iroh-relay --features server,test-utils --test relay_axum relay_prefix_nginx_https_end_to_end -- --ignored --nocapture > /tmp/staya-4617-red.log 2>&1
+          timeout 1600s cargo +1.91.0 test --locked -p iroh-base --features relay staya_red_relay_url_must_normalize_missing_slash -- --nocapture > /tmp/staya-4617-red.log 2>&1
           rc=$?
           set -e
-          tail -n 80 /tmp/staya-4617-red.log
-          if [ "$rc" -eq 0 ]; then echo "INVALID RED: old Roha prefix code passed without trailing slash"; exit 1; fi
+          tail -n 65 /tmp/staya-4617-red.log
+          if [ "$rc" -eq 0 ]; then echo "INVALID RED: Roha already normalizes RelayUrl"; exit 1; fi
           grep -q "test result: FAILED" /tmp/staya-4617-red.log || { echo "INCONCLUSIVE RED: compilation/setup failure or timeout"; exit 1; }
-          echo "RED validated: older Roha prefix logic fails without a trailing slash."
+          grep -q "STAYA: RelayUrl did not normalize" /tmp/staya-4617-red.log || { echo "INCONCLUSIVE RED: not the intended normalization failure"; exit 1; }
+          echo "RED validated: Roha routing works, but RelayUrl itself is not canonicalized."
       - name: GREEN - candidate normalizes missing slash and completes real TLS WebSocket handshake
         run: |
           set -euo pipefail
