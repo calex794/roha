@@ -1,0 +1,56 @@
+name: STAYA PR4617 normalization backport on Roha
+on:
+  push:
+    branches:
+      - lab/staya-pr4617-normalization-20261026
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  canonical-relay-url:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: "1.91.0"
+      - name: Install local TLS reverse proxy
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends nginx openssl curl
+      - name: Pin original Roha routing implementation and Cargo resolution
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import tomllib
+          cl=tomllib.loads(Path("Cargo.lock").read_text())
+          pkgs={p["name"]:p for p in cl["package"]}
+          assert pkgs["iroh-base"]["version"]=="1.3.0"
+          assert "tracing" in pkgs["iroh-base"]["dependencies"]
+          assert pkgs["noq"]["version"]=="1.4.0"
+          routing=Path("iroh-relay/src/http.rs").read_text()
+          assert "pub fn relay_route" in routing
+          assert "relay_route_keeps_path_prefix" in routing
+          src=Path("iroh-base/src/relay_url.rs").read_text()
+          assert '#[serde(from = "Url")]' in src
+          assert "test_relay_url_deserialize_trailing_slash" in src
+          PY
+      - name: PR4617 canonical URL parsing and serde/postcard
+        run: |
+          set -euo pipefail
+          cargo +1.91.0 test --locked -p iroh-base --features relay test_relay_url_ -- --nocapture
+      - name: Preserve previous Roha relay prefix behavior
+        run: |
+          set -euo pipefail
+          cargo +1.91.0 test --locked -p iroh-relay --lib relay_route_keeps_path_prefix -- --nocapture
+      - name: Real nginx/TLS/WebSocket without trailing slash, 16 sequential and 8 parallel clients
+        env:
+          STAYA_STRESS_ROUNDS: "16"
+          STAYA_PARALLEL_CLIENTS: "8"
+        run: |
+          set -euo pipefail
+          timeout 420s cargo +1.91.0 test --locked -p iroh-relay --features server,test-utils --test relay_axum relay_prefix_nginx_https_end_to_end -- --ignored --nocapture
