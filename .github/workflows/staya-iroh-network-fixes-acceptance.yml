@@ -1,0 +1,57 @@
+name: STAYA consolidated Iroh network fixes acceptance
+on:
+  push:
+    branches:
+      - lab/staya-iroh-network-fixes-20261026
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  integrated-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: "1.91.0"
+      - name: Install real TLS/WebSocket reverse-proxy dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends nginx openssl curl
+      - name: Assert Roha versions and precise candidate source contracts
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import tomllib
+          d={p["name"]:p for p in tomllib.loads(Path("Cargo.lock").read_text())["package"]}
+          assert d["noq"]["version"]=="1.4.0"
+          assert d["rustls-webpki"]["version"]=="0.103.16"
+          assert d["rustls"]["version"]=="0.23.46"
+          assert "tracing" in d["iroh-base"]["dependencies"]
+          state=Path("iroh/src/socket/remote_map/remote_state.rs").read_text()
+          assert "smallvec![selected.clone(), unpinned]" in state
+          assert "initial_on_selected_ipv6_path_arrives_when_its_local_ip_is_gone" in state
+          relay=Path("iroh-base/src/relay_url.rs").read_text()
+          assert '#[serde(from = "Url")]' in relay
+          assert "test_relay_url_deserialize_trailing_slash" in relay
+          old_route=Path("iroh-relay/src/http.rs").read_text()
+          assert "pub fn relay_route" in old_route
+          assert "relay_route_keeps_path_prefix" in old_route
+          PY
+      - name: PR4640 local-source and IPv6 fallbacks, all remote-state unit tests
+        run: cargo +1.91.0 test --locked -p iroh --lib socket::remote_map::remote_state -- --nocapture
+      - name: PR4617 canonical RelayUrl and serialization tests
+        run: cargo +1.91.0 test --locked -p iroh-base --features relay test_relay_url_ -- --nocapture
+      - name: Preserve original Roha prefix and ping routing compatibility
+        run: cargo +1.91.0 test --locked -p iroh-relay --lib relay_route_keeps_path_prefix -- --nocapture
+      - name: 16 sequential, 8 parallel authenticated clients through nginx/TLS/WS using no final slash
+        env:
+          STAYA_STRESS_ROUNDS: "16"
+          STAYA_PARALLEL_CLIENTS: "8"
+        run: |
+          set -euo pipefail
+          timeout 420s cargo +1.91.0 test --locked -p iroh-relay --features server,test-utils --test relay_axum relay_prefix_nginx_https_end_to_end -- --ignored --nocapture
