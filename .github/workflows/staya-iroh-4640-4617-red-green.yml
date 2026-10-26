@@ -1,0 +1,120 @@
+name: STAYA Iroh PR4640 + PR4617 independent RED-GREEN
+on:
+  push:
+    branches:
+      - lab/staya-iroh-4640-4617-20261026
+  workflow_dispatch:
+permissions:
+  contents: read
+
+jobs:
+  selected-local-ip-4640:
+    name: PR4640 source-IP RED / GREEN (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: "1.91.0"
+      - name: Clone pinned candidate, not default-branch copy
+        run: |
+          set -euo pipefail
+          git clone --quiet --depth 1 --branch fix/initial-keeps-selected-local-ip https://github.com/abixalmon/iroh.git pr4640
+          test "$(git -C pr4640 rev-parse HEAD)" = "266e01087a923e97254b5b10f8bca4eb640ec5b4"
+          cp pr4640/iroh/src/socket/remote_map/remote_state.rs /tmp/staya-pr4640-green.rs
+      - name: RED - emulate original unpinned selected-path behavior with candidate regression test
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("pr4640/iroh/src/socket/remote_map/remote_state.rs")
+          s = p.read_text()
+          start = s.index("fn selected_path_targets(")
+          end = s.index("\nasync fn send_datagram_to_targets(", start)
+          old_behavior = """fn selected_path_targets(selected: &transports::FourTuple) -> SmallVec<[transports::FourTuple; 8]> {
+              smallvec![transports::FourTuple::from_remote(selected.remote())]
+          }
+          """
+          p.write_text(s[:start] + old_behavior + s[end:])
+          PY
+          cd pr4640
+          set +e
+          cargo +1.91.0 test --locked -p iroh --lib initial_on_selected_path_leaves_from_its_local_ip -- --nocapture > ../staya-4640-red.log 2>&1
+          rc=$?
+          set -e
+          tail -n 80 ../staya-4640-red.log
+          if [ "$rc" -eq 0 ]; then echo "INVALID RED: old behavior unexpectedly passes"; exit 1; fi
+          grep -q "test result: FAILED" ../staya-4640-red.log || { echo "INCONCLUSIVE RED: compilation or setup failed"; exit 1; }
+          grep -q "received only from" ../staya-4640-red.log || { echo "INCONCLUSIVE RED: did not observe the expected source-address failure"; exit 1; }
+          echo "RED validated: unpinned selected path did not retain its local IP."
+      - name: GREEN - original candidate, selected local IP and fallback
+        run: |
+          set -euo pipefail
+          cp /tmp/staya-pr4640-green.rs pr4640/iroh/src/socket/remote_map/remote_state.rs
+          cd pr4640
+          cargo +1.91.0 test --locked -p iroh --lib initial_on_selected_path -- --nocapture
+          echo "GREEN: selected-path source-IP tests passed."
+
+  relay-prefix-4617:
+    name: PR4617 URL normalization + real TLS nginx RED / GREEN
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: "1.91.0"
+      - name: Install local TLS reverse-proxy tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends nginx openssl curl
+      - name: Prepare previously verified STAYA nginx fixture using prefix without trailing slash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("iroh-relay/tests/relay_axum.rs")
+          s = p.read_text()
+          before = 'let relay_url: RelayUrl = format!("{base_url}/prefix/").parse()?;'
+          after  = 'let relay_url: RelayUrl = format!("{base_url}/prefix").parse()?;'
+          assert s.count(before) == 1, "STAYA fixture drifted"
+          s = s.replace(before, after)
+          assert "relay_prefix_nginx_https_end_to_end" in s
+          p.write_text(s)
+          PY
+          cp iroh-relay/tests/relay_axum.rs /tmp/staya-pr4617-nginx-test.rs
+          git clone --quiet --depth 1 --branch relay-url-prefix https://github.com/meiyasan/iroh.git pr4617
+          test "$(git -C pr4617 rev-parse HEAD)" = "aca28deaa6db9d359de7b8aa70c5673ced1fd7d1"
+      - name: RED - older tested Roha prefix code without final slash should fail
+        run: |
+          set -euo pipefail
+          set +e
+          timeout 1600s cargo +1.91.0 test --locked -p iroh-relay --features server,test-utils --test relay_axum relay_prefix_nginx_https_end_to_end -- --ignored --nocapture > /tmp/staya-4617-red.log 2>&1
+          rc=$?
+          set -e
+          tail -n 80 /tmp/staya-4617-red.log
+          if [ "$rc" -eq 0 ]; then echo "INVALID RED: old Roha prefix code passed without trailing slash"; exit 1; fi
+          grep -q "test result: FAILED" /tmp/staya-4617-red.log || { echo "INCONCLUSIVE RED: compilation/setup failure or timeout"; exit 1; }
+          echo "RED validated: older Roha prefix logic fails without a trailing slash."
+      - name: GREEN - candidate normalizes missing slash and completes real TLS WebSocket handshake
+        run: |
+          set -euo pipefail
+          cp /tmp/staya-pr4617-nginx-test.rs pr4617/iroh-relay/tests/relay_axum.rs
+          cd pr4617
+          cargo +1.91.0 test --locked -p iroh-base --features relay test_relay_url_deserialize_trailing_slash -- --nocapture
+          timeout 800s cargo +1.91.0 test --locked -p iroh-relay --features server,test-utils --test relay_axum relay_prefix_nginx_https_end_to_end -- --ignored --nocapture
+          echo "GREEN: PR4617 missing-slash /prefix via real nginx/TLS passed."
+      - name: GREEN - 16 sequential connections + 8 parallel clients
+        env:
+          STAYA_STRESS_ROUNDS: "16"
+          STAYA_PARALLEL_CLIENTS: "8"
+        run: |
+          set -euo pipefail
+          cd pr4617
+          timeout 300s cargo +1.91.0 test --locked -p iroh-relay --features server,test-utils --test relay_axum relay_prefix_nginx_https_end_to_end -- --ignored --nocapture
+          echo "GREEN: PR4617 local nginx/TLS bounded churn and parallel clients passed."
