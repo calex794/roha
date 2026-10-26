@@ -381,7 +381,7 @@ http {{
 
     // The native client must retain /prefix/relay while changing HTTPS to WSS,
     // then successfully upgrade and authenticate against the real relay.
-    let relay_url: RelayUrl = format!("{base_url}/prefix/").parse()?;
+    let relay_url: RelayUrl = format!("{base_url}/prefix").parse()?;
     let tls_config = CaTlsConfig::insecure_skip_verify().client_config(default_provider())?;
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
     // CI can increase the number of real TLS/WebSocket handshakes on the
