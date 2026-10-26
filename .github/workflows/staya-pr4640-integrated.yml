@@ -1,0 +1,45 @@
+name: STAYA integrated PR4640 regression on Roha
+on:
+  push:
+    branches:
+      - lab/staya-pr4640-integrated-20261026
+  workflow_dispatch:
+permissions:
+  contents: read
+
+jobs:
+  source-ip-validated:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: "1.91.0"
+      - name: Assert imported PR4640 content remains exact
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          s = Path("iroh/src/socket/remote_map/remote_state.rs").read_text()
+          assert "fn selected_path_targets(" in s
+          assert "smallvec![selected.clone(), unpinned]" in s
+          assert "initial_on_selected_path_leaves_from_its_local_ip" in s
+          assert "initial_on_selected_path_arrives_when_its_local_ip_is_gone" in s
+          assert "initial_on_selected_ipv6_path_arrives_when_its_local_ip_is_gone" in s
+          assert "selected_path_without_local_address_is_sent_to_once" in s
+          PY
+      - name: Test all relevant remote-state regressions on actual Roha dependency graph
+        run: |
+          set -euo pipefail
+          cargo +1.91.0 test --locked -p iroh --lib socket::remote_map::remote_state -- --nocapture
+      - name: Test IPv6 fallback explicitly (not covered by prefix initial_on_selected_path)
+        run: |
+          set -euo pipefail
+          cargo +1.91.0 test --locked -p iroh --lib initial_on_selected_ipv6_path_arrives_when_its_local_ip_is_gone -- --nocapture
+      - name: No-local-IP relay target must not be duplicated
+        run: |
+          set -euo pipefail
+          cargo +1.91.0 test --locked -p iroh --lib selected_path_without_local_address_is_sent_to_once -- --nocapture
