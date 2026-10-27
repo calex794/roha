@@ -30,7 +30,8 @@ use iroh_dns::dns::{DnsError, DnsResolver, StaggeredError};
 #[cfg(not(wasm_browser))]
 use iroh_relay::quic::QuicClient;
 use iroh_relay::{
-    RelayConfig, RelayMap, defaults::DEFAULT_RELAY_QUIC_PORT,
+    RelayConfig, RelayMap,
+    defaults::DEFAULT_RELAY_QUIC_PORT,
     http::{RELAY_PROBE_PATH, relay_route},
 };
 use n0_error::{e, stack_error};
