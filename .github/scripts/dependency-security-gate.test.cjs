@@ -126,3 +126,84 @@ test('GitHub API errors and absent audit evidence must HOLD', async () => {
   const empty = async () => ({ workflow_runs: [] });
   await assert.rejects(checkLatestAudit('calex794/roha', 'test', empty, now), /no fresh actual RustSec audit/);
 });
+
+/**
+ * End-to-end regression: actually execute the SAME CLI used by the required
+ * protected "cargo deny" job. Controlled GitHub Actions API responses are
+ * injected only in a child process. --base=HEAD --head=HEAD means an ordinary
+ * non-dependency PR: no local security-policy remediation exemption.
+ *
+ * Never mutate the real main watchdog state, branch rules or Cargo.lock.
+ */
+const { spawnSync, execFileSync } = require('node:child_process');
+const path = require('node:path');
+const childMockPath = path.resolve(__dirname, 'dependency-security-gate.mock.cjs');
+const childGatePath = path.resolve(__dirname, 'dependency-security-gate.cjs');
+
+function invokeSecurityGateWithMock(scenario) {
+  const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+    encoding: 'utf8',
+    cwd: process.cwd(),
+  }).trim();
+  const result = spawnSync(process.execPath, [
+    childGatePath, '--base=' + head, '--head=' + head,
+  ], {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+    timeout: 15_000,
+    env: {
+      ...process.env,
+      GITHUB_REPOSITORY: 'calex794/roha',
+      GH_TOKEN: 'fixture-only-token',
+      ROHA_RUSTSEC_E2E_SCENARIO: scenario,
+      NODE_OPTIONS: '--require=' + childMockPath,
+    },
+  });
+  assert.equal(result.error, undefined, result.stderr);
+  return result;
+}
+
+test('required cargo-deny CLI E2E: current verified audit passes without local scan', () => {
+  const result = invokeSecurityGateWithMock('fresh');
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /SECURITY: fresh successful RustSec scan in run 204/);
+  assert.match(result.stdout, /scan_required=false/);
+  assert.match(result.stdout, /bootstrap_mode=false/);
+});
+
+test('required cargo-deny CLI E2E: newest skipped day uses only an older real green audit', () => {
+  const result = invokeSecurityGateWithMock('skipped_then_green');
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /fresh successful RustSec scan in run 203/);
+  assert.match(result.stdout, /scan_required=false/);
+});
+
+test('required cargo-deny CLI E2E: page 2 can contain the latest real watchdog', () => {
+  const result = invokeSecurityGateWithMock('page_two');
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /fresh successful RustSec scan in run 204/);
+});
+
+for (const [scenario, expected] of [
+  ['stale', /older than 96 hours/],
+  ['future_timestamp', /invalid watchdog audit completion timestamp/],
+  ['failed_newest', /watchdog audit failed or unavailable/],
+  ['in_progress', /not completed/],
+  ['missing_job', /watchdog audit job missing/],
+  ['only_skipped', /no fresh actual RustSec audit/],
+  ['wrong_workflow', /no fresh actual RustSec audit/],
+  ['empty_runs', /no fresh actual RustSec audit/],
+  ['http_403', /GitHub Actions API HTTP 403/],
+  ['job_http_403', /GitHub Actions API HTTP 403/],
+  ['network_unavailable', /Simulated GitHub API outage/],
+  ['malformed_api', /missing workflow_runs/],
+]) {
+  test('required cargo-deny CLI E2E: ' + scenario + ' must fail closed', () => {
+    const result = invokeSecurityGateWithMock(scenario);
+    assert.equal(result.status, 1,
+      'Expected mandatory HOLD. stdout=' + result.stdout + ' stderr=' + result.stderr);
+    assert.match(result.stderr, expected);
+    assert.doesNotMatch(result.stdout, /scan_required=true|bootstrap_mode=true/,
+      'Unrelated PR must not gain a remediation exemption');
+  });
+}
