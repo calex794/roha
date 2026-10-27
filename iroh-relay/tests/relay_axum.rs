@@ -232,3 +232,272 @@ async fn relay_embed_axum() -> Result<()> {
     .std_context("timeout")??;
     Ok(())
 }
+
+
+/// Verify the real TLS reverse-proxy configuration, not merely path concatenation.
+///
+/// The test boots an axum relay backend on a private port, then a separate nginx
+/// process with TLS termination and a /prefix/ path rewrite.  A native relay
+/// client must complete the protocol handshake through nginx's WebSocket upgrade.
+///
+/// This test is intentionally ignored by the normal suite.  The dedicated CI
+/// job installs the three system tools and invokes it with \`--ignored\`.
+#[cfg(unix)]
+#[tokio::test]
+#[traced_test]
+#[ignore = "requires nginx, openssl and curl; run using the dedicated STAYA proxy CI job"]
+async fn relay_prefix_nginx_https_end_to_end() -> Result<()> {
+    use std::{
+        path::PathBuf,
+        process::{Child, Command, Stdio},
+    };
+
+    struct NginxGuard {
+        child: Child,
+        dir: PathBuf,
+    }
+    impl Drop for NginxGuard {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (backend_addr, _backend_guard) = serve_axum().await?;
+
+    // Reserve a real loopback port for the independent TLS proxy.
+    let port_picker = TcpListener::bind("127.0.0.1:0").await?;
+    let proxy_port = port_picker.local_addr()?.port();
+    drop(port_picker);
+
+    let workdir = std::env::temp_dir().join(format!(
+        "staya-relay-nginx-{}-{proxy_port}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&workdir)?;
+    let cert = workdir.join("server.pem");
+    let key = workdir.join("server.key");
+    let openssl = Command::new("openssl")
+        .args(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1"])
+        .arg("-keyout")
+        .arg(&key)
+        .arg("-out")
+        .arg(&cert)
+        .args(["-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"])
+        .output()?;
+    assert!(
+        openssl.status.success(),
+        "could not create a local TLS certificate: {}",
+        String::from_utf8_lossy(&openssl.stderr)
+    );
+
+    // nginx strips /prefix/ before forwarding to the unmodified relay backend.
+    // WebSocket upgrades must survive the extra proxy hop.
+    let config = format!(
+        r#"worker_processes 1;
+daemon off;
+pid {dir}/nginx.pid;
+error_log stderr warn;
+events {{ worker_connections 128; }}
+http {{
+    access_log off;
+    server {{
+        listen 127.0.0.1:{proxy_port} ssl;
+        server_name localhost;
+        ssl_certificate {cert};
+        ssl_certificate_key {key};
+        location /prefix/ {{
+            proxy_pass http://{backend_addr}/;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host $host;
+            proxy_read_timeout 30s;
+        }}
+    }}
+}}
+"#,
+        dir=workdir.display(),
+        cert=cert.display(),
+        key=key.display(),
+    );
+    let conf = workdir.join("nginx.conf");
+    std::fs::write(&conf, config)?;
+    let child = Command::new("nginx")
+        .arg("-p")
+        .arg(&workdir)
+        .arg("-c")
+        .arg(&conf)
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+    let _proxy_guard = NginxGuard {
+        child,
+        dir: workdir,
+    };
+
+    let base_url = format!("https://127.0.0.1:{proxy_port}");
+    let ping_url = format!("{base_url}/prefix/ping");
+    // Command::output blocks its calling thread.  This integration test
+    // serves the relay on the Tokio executor, so running curl directly here
+    // starves that server of runtime turns on the default current-thread
+    // Tokio test runtime.  Keep the process call on Tokio's blocking pool.
+    let status_for = |target: String| async move {
+        tokio::task::spawn_blocking(move || -> Result<String> {
+            let output = Command::new("curl")
+                .args(["--insecure", "--silent", "--show-error", "--output", "/dev/null", "--max-time", "2"])
+                .args(["--write-out", "%{http_code}"])
+                .arg(&target)
+                .output()?;
+            if !output.status.success() {
+                eprintln!(
+                    "curl to {target} returned {:?}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        })
+        .await
+        .expect("curl blocking worker exited unexpectedly")
+    };
+
+    let mut ready = false;
+    for _ in 0..40 {
+        if status_for(ping_url.clone()).await? == "200" {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(ready, "HTTPS /prefix/ping never became reachable through nginx");
+    assert_eq!(
+        status_for(format!("{base_url}/ping")).await?,
+        "404",
+        "unprefixed probe must not be served by the reverse proxy"
+    );
+
+    // The native client must retain /prefix/relay while changing HTTPS to WSS,
+    // then successfully upgrade and authenticate against the real relay.
+    let relay_url: RelayUrl = format!("{base_url}/prefix").parse()?;
+    let tls_config = CaTlsConfig::insecure_skip_verify().client_config(default_provider())?;
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+    // CI can increase the number of real TLS/WebSocket handshakes on the
+    // same nginx/backend process. No requests go to an external service.
+    let rounds: usize = std::env::var("STAYA_STRESS_ROUNDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    assert!((1..=64).contains(&rounds), "bounded to 64 local handshakes");
+    let mut succeeded = 0usize;
+    for i in 0..rounds {
+        let conn = tokio::time::timeout(
+            Duration::from_secs(10),
+            ClientBuilder::new(
+                relay_url.clone(),
+                SecretKey::from_bytes(&rng.random()),
+                DnsResolver::new(),
+            )
+            .tls_client_config(tls_config.clone())
+            .connect(),
+        )
+        .await
+        .std_context("timeout connecting to relay over nginx HTTPS")??;
+        succeeded += 1;
+        // Exercise client disconnect and reconnection on one running relay.
+        drop(conn);
+        if (i + 1) % 8 == 0 {
+            assert_eq!(
+                status_for(ping_url.clone()).await?,
+                "200",
+                "relay probe failed during connection churn"
+            );
+        }
+    }
+    assert_eq!(succeeded, rounds);
+    eprintln!("STAYA relay local HTTPS nginx connections: {succeeded}/{rounds}");
+
+    // Exercise genuinely concurrent authenticated connections, not just churn.
+    let parallel: usize = std::env::var("STAYA_PARALLEL_CLIENTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    assert!(parallel <= 32, "bounded to 32 parallel clients");
+    if parallel > 0 {
+        use iroh_relay::protos::relay::{ClientToRelayMsg, RelayToClientMsg};
+        use n0_future::{SinkExt, StreamExt};
+        let (ready_tx, mut ready_rx) = tokio::sync::mpsc::channel(parallel);
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut tasks = Vec::with_capacity(parallel);
+        for index in 0..parallel {
+            let url = relay_url.clone();
+            let tls = tls_config.clone();
+            let tx = ready_tx.clone();
+            let release = release.clone();
+            let key = SecretKey::from_bytes(&rng.random());
+            tasks.push(tokio::spawn(async move {
+                let mut conn = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    ClientBuilder::new(url, key, DnsResolver::new())
+                        .tls_client_config(tls)
+                        .connect(),
+                )
+                .await
+                .std_context("parallel relay connect timed out")??;
+                let payload = (index as u64).to_be_bytes();
+                conn.send(ClientToRelayMsg::Ping(payload)).await?;
+                let pong = tokio::time::timeout(Duration::from_secs(5), async {
+                    while let Some(message) = conn.next().await {
+                        if let RelayToClientMsg::Pong(p) = message? {
+                            if p == payload {
+                                return Ok::<_, n0_error::AnyError>(());
+                            }
+                        }
+                    }
+                    return Err(n0_error::AnyError::from("relay stream ended before ping response"));
+                })
+                .await
+                .std_context("parallel relay ping timed out")??;
+                let _ = pong;
+                tx.send(index).await.expect("parallel result receiver disappeared");
+                release.notified().await;
+                // Verify each connection is still usable after the hold.
+                conn.send(ClientToRelayMsg::Ping(payload)).await?;
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while let Some(message) = conn.next().await {
+                        if let RelayToClientMsg::Pong(p) = message? {
+                            if p == payload {
+                                return Ok::<_, n0_error::AnyError>(());
+                            }
+                        }
+                    }
+                    return Err(n0_error::AnyError::from("relay stream ended during hold"));
+                })
+                .await
+                .std_context("parallel relay second ping timed out")??;
+                Ok::<_, n0_error::AnyError>(())
+            }));
+        }
+        drop(ready_tx);
+        let finish = async {
+            for _ in 0..parallel {
+                ready_rx.recv().await.expect("parallel client exited early");
+            }
+            assert_eq!(status_for(ping_url.clone()).await?, "200");
+            tokio::time::sleep(Duration::from_secs(8)).await;
+            assert_eq!(status_for(ping_url.clone()).await?, "200");
+            release.notify_waiters();
+            for task in tasks {
+                task.await.expect("parallel client task panicked")?;
+            }
+            Ok::<_, n0_error::AnyError>(())
+        };
+        tokio::time::timeout(Duration::from_secs(60), finish)
+            .await
+            .std_context("parallel relay test timed out")??;
+        eprintln!("STAYA parallel live relay clients: {parallel}/{parallel}");
+    }
+    Ok(())
+}
