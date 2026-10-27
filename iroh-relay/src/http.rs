@@ -131,11 +131,26 @@ mod tests {
     #[test]
     fn relay_route_keeps_path_prefix() {
         let route = |url: &str, path| relay_route(&url.parse().unwrap(), path).to_string();
-        assert_eq!(route("https://example.com", RELAY_PATH), "https://example.com/relay");
-        assert_eq!(route("https://example.com/", RELAY_PROBE_PATH), "https://example.com/ping");
-        assert_eq!(route("https://example.com/prefix/", RELAY_PATH), "https://example.com/prefix/relay");
-        assert_eq!(route("https://example.com/prefix/", RELAY_PROBE_PATH), "https://example.com/prefix/ping");
-        assert_eq!(route("https://example.com/a/b", RELAY_PROBE_PATH), "https://example.com/a/b/ping");
+        assert_eq!(
+            route("https://example.com", RELAY_PATH),
+            "https://example.com/relay"
+        );
+        assert_eq!(
+            route("https://example.com/", RELAY_PROBE_PATH),
+            "https://example.com/ping"
+        );
+        assert_eq!(
+            route("https://example.com/prefix/", RELAY_PATH),
+            "https://example.com/prefix/relay"
+        );
+        assert_eq!(
+            route("https://example.com/prefix/", RELAY_PROBE_PATH),
+            "https://example.com/prefix/ping"
+        );
+        assert_eq!(
+            route("https://example.com/a/b", RELAY_PROBE_PATH),
+            "https://example.com/a/b/ping"
+        );
     }
 
     #[test]
