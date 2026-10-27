@@ -233,7 +233,6 @@ async fn relay_embed_axum() -> Result<()> {
     Ok(())
 }
 
-
 /// Verify the real TLS reverse-proxy configuration, not merely path concatenation.
 ///
 /// The test boots an axum relay backend on a private port, then a separate nginx
@@ -280,12 +279,19 @@ async fn relay_prefix_nginx_https_end_to_end() -> Result<()> {
     let cert = workdir.join("server.pem");
     let key = workdir.join("server.key");
     let openssl = Command::new("openssl")
-        .args(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1"])
+        .args([
+            "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+        ])
         .arg("-keyout")
         .arg(&key)
         .arg("-out")
         .arg(&cert)
-        .args(["-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"])
+        .args([
+            "-subj",
+            "/CN=localhost",
+            "-addext",
+            "subjectAltName=DNS:localhost,IP:127.0.0.1",
+        ])
         .output()?;
     assert!(
         openssl.status.success(),
@@ -319,9 +325,9 @@ http {{
     }}
 }}
 "#,
-        dir=workdir.display(),
-        cert=cert.display(),
-        key=key.display(),
+        dir = workdir.display(),
+        cert = cert.display(),
+        key = key.display(),
     );
     let conf = workdir.join("nginx.conf");
     std::fs::write(&conf, config)?;
@@ -347,7 +353,15 @@ http {{
     let status_for = |target: String| async move {
         tokio::task::spawn_blocking(move || -> Result<String> {
             let output = Command::new("curl")
-                .args(["--insecure", "--silent", "--show-error", "--output", "/dev/null", "--max-time", "2"])
+                .args([
+                    "--insecure",
+                    "--silent",
+                    "--show-error",
+                    "--output",
+                    "/dev/null",
+                    "--max-time",
+                    "2",
+                ])
                 .args(["--write-out", "%{http_code}"])
                 .arg(&target)
                 .output()?;
@@ -372,7 +386,10 @@ http {{
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert!(ready, "HTTPS /prefix/ping never became reachable through nginx");
+    assert!(
+        ready,
+        "HTTPS /prefix/ping never became reachable through nginx"
+    );
     assert_eq!(
         status_for(format!("{base_url}/ping")).await?,
         "404",
@@ -448,32 +465,35 @@ http {{
                 .std_context("parallel relay connect timed out")??;
                 let payload = (index as u64).to_be_bytes();
                 conn.send(ClientToRelayMsg::Ping(payload)).await?;
-                let pong = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::time::timeout(Duration::from_secs(5), async {
                     while let Some(message) = conn.next().await {
-                        if let RelayToClientMsg::Pong(p) = message? {
-                            if p == payload {
-                                return Ok::<_, n0_error::AnyError>(());
-                            }
+                        if let RelayToClientMsg::Pong(p) = message?
+                            && p == payload
+                        {
+                            return Ok::<_, n0_error::AnyError>(());
                         }
                     }
-                    return Err(n0_error::AnyError::from("relay stream ended before ping response"));
+                    Err(n0_error::AnyError::from(
+                        "relay stream ended before ping response",
+                    ))
                 })
                 .await
                 .std_context("parallel relay ping timed out")??;
-                let _ = pong;
-                tx.send(index).await.expect("parallel result receiver disappeared");
+                tx.send(index)
+                    .await
+                    .expect("parallel result receiver disappeared");
                 release.notified().await;
                 // Verify each connection is still usable after the hold.
                 conn.send(ClientToRelayMsg::Ping(payload)).await?;
                 tokio::time::timeout(Duration::from_secs(5), async {
                     while let Some(message) = conn.next().await {
-                        if let RelayToClientMsg::Pong(p) = message? {
-                            if p == payload {
-                                return Ok::<_, n0_error::AnyError>(());
-                            }
+                        if let RelayToClientMsg::Pong(p) = message?
+                            && p == payload
+                        {
+                            return Ok::<_, n0_error::AnyError>(());
                         }
                     }
-                    return Err(n0_error::AnyError::from("relay stream ended during hold"));
+                    Err(n0_error::AnyError::from("relay stream ended during hold"))
                 })
                 .await
                 .std_context("parallel relay second ping timed out")??;
