@@ -571,10 +571,38 @@ jobs:
     timeout-minutes: 30
     name: cargo deny
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
+      - name: Test unified RustSec fail-closed policy
+        run: node --test .github/scripts/dependency-security-gate.test.cjs
+      - name: Require fresh Roha main RustSec evidence before merge
+        id: dependency_security
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          node .github/scripts/dependency-security-gate.cjs --base="$BASE_SHA" --head=HEAD >> "$GITHUB_OUTPUT"
+      - name: Install pinned cargo-audit when dependencies or policies changed
+        if: github.event_name != 'pull_request' || steps.dependency_security.outputs.scan_required == 'true'
+        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with:
+          tool: cargo-audit@0.22.2
+      - name: Verify current Cargo.lock using real RustSec advisory database
+        if: github.event_name != 'pull_request' || steps.dependency_security.outputs.scan_required == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s Cargo.lock
+          cargo audit --no-yanked --file Cargo.lock
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           arguments: --workspace --all-features
